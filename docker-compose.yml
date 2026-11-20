@@ -1,0 +1,15 @@
+services:
+  scratchpad:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scratchpad
+    restart: unless-stopped
+    tmpfs:
+      - "/data:size=1G,uid=1000,gid=1000,mode=0755"
+    networks:
+      - proxy-net
+
+networks:
+  proxy-net:
+    external: true
