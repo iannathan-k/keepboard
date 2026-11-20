@@ -8,6 +8,21 @@ Zero social-media clutter. Zero account registration friction. Instant cold boot
 
 ## What's New in KeepBoard v3
 
+- **Modular Zero-Build Frontend Architecture**:
+  - Modular native ES6 modules (`styles.css`, `app.js`, `editor.js`, `media.js`, `index.html`) loaded via `<script type="module">` with zero external bundlers, compilers, or npm dependencies.
+- **Compact Google Keep Card Width & Grid Density Switcher**:
+  - Cards default to authentic compact Google Keep widths (`240px–280px`), cleanly presenting 4 to 6 columns across standard monitors.
+  - One-click density toggle in header cycling between **Standard Grid** (250px), **Compact Grid** (230px), and **List View** (single centered 640px column), persisted to `localStorage`.
+- **Contextual Search Flairs & Clean Composer Layout**:
+  - Clean area above composer at rest with zero permanent pill rows cluttering the board.
+  - Floating contextual flairs popover positioned under the search bar that appears dynamically on focus, supporting types (`has:files`, `is:checklist`, `is:expiring`, `is:saved`), 9-color swatches, and clickable tag chips.
+- **Live SSE Multi-Tab Synchronization**:
+  - Server-Sent Events (`GET /api/events`) broadcasting instant note creations, edits, and deletions across all connected tabs and devices in real time with polling fallback.
+- **Hybrid RAM + Persistent Disk Option**:
+  - "Save to Disk" shield toggle on cards mirroring designated notes to an optional `/persist` volume across restarts while keeping the primary store in high-speed RAM (`tmpfs`).
+- **Tab / URL Parking Lot & Inline Audio Voice Memo Recorder**:
+  - Compact bookmark section for notes with 2+ URLs and an "Open all in tabs" button.
+  - Inline microphone button in composer recording voice memos via the MediaRecorder API with live recording timer and inline audio player.
 - **Rich-Text WYSIWYG Editor (`Aa` Formatting Toolbar)**:
   - Clean `contenteditable` note editing in top capture bar, modal, and split panes.
   - Raw / Markdown Source Toggle (`</>`) to view and edit raw Markdown/HTML.

@@ -33,6 +33,11 @@ NOTES_FILE = os.path.join(DATA_DIR, "notes.json")
 VAULT_FILE = os.path.join(DATA_DIR, "vault.json")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
+# Optional persistent storage directory
+PERSIST_DIR = os.getenv("PERSIST_DIR", "/persist")
+PERSIST_FILES_DIR = os.path.join(PERSIST_DIR, "files")
+PERSIST_NOTES_FILE = os.path.join(PERSIST_DIR, "notes.json")
+
 # In-memory vault session tokens (token -> expiry_ms)
 vault_sessions: dict[str, int] = {}
 VAULT_SESSION_TTL_MS = 24 * 60 * 60 * 1000  # 24 hours
@@ -43,14 +48,31 @@ SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 # Concurrency lock for notes.json operations
 notes_lock = asyncio.Lock()
 
+# SSE event broadcast subscribers
+sse_subscribers: set[asyncio.Queue] = set()
+
 # In-memory cache for link previews
 link_preview_cache: dict[str, dict] = {}
 MAX_LINK_CACHE = 500
 
 
 # ---------------------------------------------------------------------------
-# Storage Helpers
+# Storage & Persistence Helpers
 # ---------------------------------------------------------------------------
+
+def is_persist_available() -> bool:
+    """Check if /persist directory is mounted and writable."""
+    try:
+        if not os.path.exists(PERSIST_DIR):
+            return False
+        test_file = os.path.join(PERSIST_DIR, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        os.remove(test_file)
+        return True
+    except Exception:
+        return False
+
 
 def init_storage():
     """Ensure data directories and json state files exist."""
@@ -59,6 +81,82 @@ def init_storage():
         _atomic_write(NOTES_FILE, [])
     if not os.path.exists(VAULT_FILE):
         _atomic_write(VAULT_FILE, {})
+    if is_persist_available():
+        os.makedirs(PERSIST_FILES_DIR, exist_ok=True)
+        if not os.path.exists(PERSIST_NOTES_FILE):
+            _atomic_write(PERSIST_NOTES_FILE, [])
+
+
+def sync_from_persist_on_boot():
+    """Load any notes and files marked 'saved_to_disk' from persistent disk into RAM on startup."""
+    if not is_persist_available() or not os.path.exists(PERSIST_NOTES_FILE):
+        return
+    try:
+        with open(PERSIST_NOTES_FILE, "r", encoding="utf-8") as f:
+            persisted = json.load(f)
+        if not isinstance(persisted, list):
+            return
+
+        current_notes = read_notes_sync()
+        current_ids = {n["id"]: n for n in current_notes}
+        changed = False
+
+        for p_note in persisted:
+            pid = p_note.get("id")
+            if not pid:
+                continue
+            p_note["saved_to_disk"] = True
+            if pid not in current_ids:
+                current_notes.append(p_note)
+                changed = True
+            else:
+                current_ids[pid]["saved_to_disk"] = True
+                changed = True
+
+            # Restore physical attachments from /persist/files/ to /data/files/
+            for att in p_note.get("attachments", []):
+                sname = att.get("stored_name")
+                if sname:
+                    p_path = os.path.join(PERSIST_FILES_DIR, sname)
+                    d_path = os.path.join(FILES_DIR, sname)
+                    if os.path.exists(p_path) and not os.path.exists(d_path):
+                        shutil.copy2(p_path, d_path)
+
+        if changed:
+            _atomic_write(NOTES_FILE, current_notes)
+    except Exception as e:
+        print(f"Error restoring from persist disk: {e}")
+
+
+def mirror_note_to_persist(note: dict, remove: bool = False):
+    """Mirror or remove a note with 'saved_to_disk' to /persist disk."""
+    if not is_persist_available():
+        return
+    try:
+        os.makedirs(PERSIST_FILES_DIR, exist_ok=True)
+        persisted = []
+        if os.path.exists(PERSIST_NOTES_FILE):
+            with open(PERSIST_NOTES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    persisted = data
+
+        nid = note.get("id")
+        persisted = [n for n in persisted if n.get("id") != nid]
+
+        if not remove and note.get("saved_to_disk"):
+            persisted.append(note)
+            for att in note.get("attachments", []):
+                sname = att.get("stored_name")
+                if sname:
+                    d_path = os.path.join(FILES_DIR, sname)
+                    p_path = os.path.join(PERSIST_FILES_DIR, sname)
+                    if os.path.exists(d_path) and not os.path.exists(p_path):
+                        shutil.copy2(d_path, p_path)
+
+        _atomic_write(PERSIST_NOTES_FILE, persisted)
+    except Exception as e:
+        print(f"Error mirroring to persist: {e}")
 
 
 def _atomic_write(path: str, obj: Any):
@@ -94,6 +192,20 @@ def read_vault_meta() -> dict:
             return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Server-Sent Events (SSE) Live Multi-Device Sync
+# ---------------------------------------------------------------------------
+
+async def broadcast_event(event_type: str, data: dict):
+    """Broadcast an update event to all active browser tabs/devices."""
+    msg = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+    for queue in list(sse_subscribers):
+        try:
+            queue.put_nowait(msg)
+        except Exception:
+            sse_subscribers.discard(queue)
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +328,13 @@ def delete_file_on_disk(stored_name: str):
             os.remove(path)
         except OSError:
             pass
+    if is_persist_available():
+        p_path = os.path.join(PERSIST_FILES_DIR, stored_name)
+        if os.path.exists(p_path):
+            try:
+                os.remove(p_path)
+            except OSError:
+                pass
 
 
 def format_bytes_py(bytes_val: int) -> str:
@@ -359,11 +478,13 @@ async def prune_expired_and_trash():
                 purged_count += 1
                 for att in note.get("attachments", []):
                     delete_file_on_disk(att["stored_name"])
+                mirror_note_to_persist(note, remove=True)
             else:
                 kept_notes.append(note)
 
         if purged_count > 0:
             _atomic_write(NOTES_FILE, kept_notes)
+            await broadcast_event("notes_updated", {"action": "pruned", "count": purged_count})
 
 
 async def maintenance_loop():
@@ -373,7 +494,7 @@ async def maintenance_loop():
             await prune_expired_and_trash()
         except Exception:
             pass
-        await asyncio.sleep(3600)  # Check every 1 hour
+        await asyncio.sleep(3600)
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +504,8 @@ async def maintenance_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_storage()
-    # Run initial cleanup on boot
+    sync_from_persist_on_boot()
     asyncio.create_task(prune_expired_and_trash())
-    # Start periodic background task
     task = asyncio.create_task(maintenance_loop())
     yield
     task.cancel()
@@ -401,13 +521,19 @@ app = FastAPI(title="KeepBoard", lifespan=lifespan)
 class NoteUpdateRequest(BaseModel):
     title: Optional[str] = None
     text: Optional[str] = None
+    content: Optional[str] = None
     color: Optional[str] = None
     pinned: Optional[bool] = None
+    is_pinned: Optional[bool] = None
     archived: Optional[bool] = None
+    is_archived: Optional[bool] = None
     trashed: Optional[bool] = None
+    is_trash: Optional[bool] = None
     deleted_at: Optional[int] = None
     expires_at: Optional[int] = None
     is_vault: Optional[bool] = None
+    saved_to_disk: Optional[bool] = None
+    snoozed_until: Optional[int] = None
     checklist: Optional[list] = None
     tags: Optional[list] = None
     sort_order: Optional[int] = None
@@ -415,8 +541,8 @@ class NoteUpdateRequest(BaseModel):
 
 class BatchActionRequest(BaseModel):
     ids: List[str]
-    action: str  # "pin", "unpin", "color", "archive", "unarchive", "trash", "restore", "delete_forever", "add_tag", "remove_tag", "merge"
-    payload: Optional[dict] = None
+    action: str  # "pin", "unpin", "color", "archive", "unarchive", "trash", "restore", "delete_forever", "add_tag", "remove_tag", "merge", "toggle_persist"
+    payload: Optional[Any] = None
 
 
 class BatchDownloadRequest(BaseModel):
@@ -424,7 +550,7 @@ class BatchDownloadRequest(BaseModel):
 
 
 class ReorderRequest(BaseModel):
-    order: List[str]  # Ordered list of note IDs
+    order: List[str]
 
 
 class VaultSetPasswordRequest(BaseModel):
@@ -444,13 +570,24 @@ class RenameAttachmentRequest(BaseModel):
     filename: str
 
 
+class SnoozeRequest(BaseModel):
+    snooze_until: Optional[int] = None
+    snoozed_until: Optional[int] = None
+
+
 # ---------------------------------------------------------------------------
-# API: System Health & Stats
+# API: System Health, Stats & SSE Live Sync
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy", "service": "KeepBoard", "version": "3.0.0", "data_dir": DATA_DIR}
+    return {
+        "status": "healthy",
+        "service": "KeepBoard",
+        "version": "3.1.0",
+        "data_dir": DATA_DIR,
+        "persist_available": is_persist_available()
+    }
 
 
 @app.get("/api/stats")
@@ -466,6 +603,7 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
     archived_count = len([n for n in notes_in_view if n.get("archived") and not n.get("trashed")])
     trashed_count = len([n for n in notes_in_view if n.get("trashed")])
     vault_count = len([n for n in all_notes if n.get("is_vault")])
+    persist_count = len([n for n in all_notes if n.get("saved_to_disk")])
 
     total_files_bytes = 0
     total_files_count = 0
@@ -479,11 +617,44 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
         "archived_count": archived_count,
         "trashed_count": trashed_count,
         "vault_count": vault_count,
+        "persist_count": persist_count,
+        "persist_available": is_persist_available(),
         "total_notes": len(all_notes),
         "total_files_count": total_files_count,
         "total_files_bytes": total_files_bytes,
         "storage_dir": DATA_DIR
     }
+
+
+@app.get("/api/events")
+async def events_stream(request: Request):
+    """Server-Sent Events endpoint for instant live sync across open tabs and devices."""
+    queue = asyncio.Queue(maxsize=50)
+    sse_subscribers.add(queue)
+
+    async def generator():
+        try:
+            yield f"event: connected\ndata: {json.dumps({'time': int(time.time() * 1000)})}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield msg
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            sse_subscribers.discard(queue)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -496,13 +667,7 @@ async def get_notes(
     x_view: Optional[str] = Header(default=None),
     x_vault_token: Optional[str] = Header(default=None)
 ):
-    """
-    Retrieve notes based on the view filter:
-    - 'notes' (default): active notes (not archived, not trashed, not vault)
-    - 'archive': archived notes (not trashed, not vault)
-    - 'trash': trashed notes (not vault)
-    - 'vault': vault notes (strictly requires valid vault token)
-    """
+    """Retrieve notes filtered by view."""
     active_view = x_view or view or "notes"
     vault_ok = _validate_vault_token(x_vault_token)
 
@@ -517,10 +682,9 @@ async def get_notes(
         filtered = [n for n in all_notes if n.get("archived") and not n.get("trashed") and not n.get("is_vault")]
     elif active_view == "trash":
         filtered = [n for n in all_notes if n.get("trashed") and not n.get("is_vault")]
-    else:  # 'notes' main board
+    else:
         filtered = [n for n in all_notes if not n.get("archived") and not n.get("trashed") and not n.get("is_vault")]
 
-    # Sort order: pinned first, then sort_order asc (if non-zero), then updated_at descending
     def sort_key(note):
         pinned = not bool(note.get("pinned", False))
         order = note.get("sort_order", 0)
@@ -540,20 +704,34 @@ async def get_notes(
 async def create_note(
     title: str = Form(""),
     text: str = Form(""),
+    content: Optional[str] = Form(None),
     color: str = Form("#1b1c1f"),
     pinned: bool = Form(False),
+    is_pinned: Optional[bool] = Form(None),
     archived: bool = Form(False),
+    is_archived: Optional[bool] = Form(None),
     is_vault: bool = Form(False),
-    expires_in: int = Form(0),  # In seconds (0 = never, 3600 = 1h, 86400 = 24h, 604800 = 7d)
+    saved_to_disk: bool = Form(False),
+    snoozed_until: int = Form(0),
+    expires_in: int = Form(0),
+    ttl: Optional[str] = Form(None),
     tags: str = Form("[]"),
     checklist: str = Form("[]"),
+    is_checklist: Optional[bool] = Form(None),
     files: List[UploadFile] = File(default=[]),
     x_vault_token: Optional[str] = Header(default=None)
 ):
-    """Create a new note with arbitrary binary attachments and optional checklist/TTL."""
+    """Create a new note with arbitrary binary attachments and optional checklist/TTL/persist."""
     is_vault_bool = bool(is_vault) if isinstance(is_vault, bool) else bool(getattr(is_vault, "default", False))
     pinned_bool = bool(pinned) if isinstance(pinned, bool) else bool(getattr(pinned, "default", False))
+    if is_pinned is not None:
+        pinned_bool = bool(is_pinned) if isinstance(is_pinned, bool) else bool(getattr(is_pinned, "default", False))
+
     archived_bool = bool(archived) if isinstance(archived, bool) else bool(getattr(archived, "default", False))
+    if is_archived is not None:
+        archived_bool = bool(is_archived) if isinstance(is_archived, bool) else bool(getattr(is_archived, "default", False))
+
+    saved_disk_bool = bool(saved_to_disk) if isinstance(saved_to_disk, bool) else bool(getattr(saved_to_disk, "default", False))
 
     if is_vault_bool and not _validate_vault_token(x_vault_token):
         raise HTTPException(status_code=403, detail="Vault authentication required to create vault notes.")
@@ -583,35 +761,58 @@ async def create_note(
         parsed_checklist = []
 
     exp_val = expires_in if isinstance(expires_in, int) else getattr(expires_in, "default", 0)
+    ttl_val = ttl if isinstance(ttl, str) else getattr(ttl, "default", None)
+    if ttl_val and exp_val == 0:
+        ttl_map = {"1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000}
+        exp_val = ttl_map.get(ttl_val, 0)
     expires_at = (now + exp_val * 1000) if exp_val > 0 else 0
+    snooze_val = snoozed_until if isinstance(snoozed_until, int) else getattr(snoozed_until, "default", 0)
+
     note_title = title if isinstance(title, str) else getattr(title, "default", "")
     note_text = text if isinstance(text, str) else getattr(text, "default", "")
+    content_val = content if isinstance(content, str) else getattr(content, "default", None)
+    if content_val and not note_text:
+        note_text = content_val
+
     note_color = color if isinstance(color, str) else getattr(color, "default", "#1b1c1f")
+    is_check_bool = bool(is_checklist) if isinstance(is_checklist, bool) else bool(getattr(is_checklist, "default", False))
+    if parsed_checklist:
+        is_check_bool = True
 
     new_note = {
         "id": note_id,
         "title": (note_title or "").strip(),
         "text": sanitize_html(note_text) if note_text else "",
+        "content": sanitize_html(note_text) if note_text else "",
         "color": note_color or "#1b1c1f",
         "pinned": pinned_bool,
+        "is_pinned": pinned_bool,
         "archived": archived_bool,
+        "is_archived": archived_bool,
         "trashed": False,
+        "is_trash": False,
         "deleted_at": None,
         "expires_at": expires_at,
         "is_vault": is_vault_bool,
+        "saved_to_disk": saved_disk_bool,
+        "snoozed_until": snooze_val,
         "checklist": parsed_checklist,
+        "is_checklist": is_check_bool,
         "tags": parsed_tags,
         "attachments": attachments,
         "sort_order": 0,
         "created_at": now,
-        "updated_at": now
+        "updated_at": now,
     }
 
     async with notes_lock:
         notes = read_notes_sync()
         notes.insert(0, new_note)
         _atomic_write(NOTES_FILE, notes)
+        if saved_disk_bool:
+            mirror_note_to_persist(new_note)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "created", "id": note_id}))
     return new_note
 
 
@@ -636,14 +837,16 @@ async def duplicate_note(
         copy_note["title"] = source.get("title", "")
         copy_note["created_at"] = now
         copy_note["updated_at"] = now
-        # Deepcopy checklist, tags, and attachments
         copy_note["checklist"] = [dict(it) for it in source.get("checklist", [])]
         copy_note["tags"] = list(source.get("tags", []))
         copy_note["attachments"] = [dict(att) for att in source.get("attachments", [])]
 
         notes.insert(0, copy_note)
         _atomic_write(NOTES_FILE, notes)
+        if copy_note.get("saved_to_disk"):
+            mirror_note_to_persist(copy_note)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "duplicated", "id": copy_note["id"]}))
     return copy_note
 
 
@@ -670,19 +873,34 @@ async def update_note(
 
         if payload.title is not None:
             target["title"] = payload.title.strip()
-        if payload.text is not None:
-            target["text"] = sanitize_html(payload.text)
+        
+        note_text_val = payload.text if payload.text is not None else payload.content
+        if note_text_val is not None:
+            sanitized = sanitize_html(note_text_val)
+            target["text"] = sanitized
+            target["content"] = sanitized
+
         if payload.color is not None:
             target["color"] = payload.color
-        if payload.pinned is not None:
-            target["pinned"] = payload.pinned
-        if payload.archived is not None:
-            target["archived"] = payload.archived
-        if payload.trashed is not None:
-            target["trashed"] = payload.trashed
-            if payload.trashed:
+        
+        pinned_val = payload.pinned if payload.pinned is not None else payload.is_pinned
+        if pinned_val is not None:
+            target["pinned"] = pinned_val
+            target["is_pinned"] = pinned_val
+
+        archived_val = payload.archived if payload.archived is not None else payload.is_archived
+        if archived_val is not None:
+            target["archived"] = archived_val
+            target["is_archived"] = archived_val
+
+        trashed_val = payload.trashed if payload.trashed is not None else payload.is_trash
+        if trashed_val is not None:
+            target["trashed"] = trashed_val
+            target["is_trash"] = trashed_val
+            if trashed_val:
                 target["deleted_at"] = payload.deleted_at or now
                 target["pinned"] = False
+                target["is_pinned"] = False
             else:
                 target["deleted_at"] = None
         if payload.expires_at is not None:
@@ -692,6 +910,10 @@ async def update_note(
             if payload.is_vault:
                 target["pinned"] = False
                 target["archived"] = False
+        if payload.saved_to_disk is not None:
+            target["saved_to_disk"] = payload.saved_to_disk
+        if payload.snoozed_until is not None:
+            target["snoozed_until"] = payload.snoozed_until
         if payload.checklist is not None:
             target["checklist"] = payload.checklist
         if payload.tags is not None:
@@ -701,8 +923,85 @@ async def update_note(
 
         target["updated_at"] = now
         _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target, remove=not target.get("saved_to_disk"))
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "updated", "id": note_id}))
     return target
+
+
+@app.post("/api/notes/{note_id}/bump")
+async def bump_note(
+    note_id: str,
+    x_vault_token: Optional[str] = Header(default=None)
+):
+    """Bring note to the top of unpinned notes without pinning."""
+    now = int(time.time() * 1000)
+    async with notes_lock:
+        notes = read_notes_sync()
+        target = next((n for n in notes if n["id"] == note_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        if target.get("is_vault") and not _validate_vault_token(x_vault_token):
+            raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+        target["updated_at"] = now
+        target["sort_order"] = 0
+        target["snoozed_until"] = 0
+        _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target)
+
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "bumped", "id": note_id}))
+    return {"status": "bumped", "id": note_id, "updated_at": now}
+
+
+@app.post("/api/notes/{note_id}/snooze")
+async def snooze_note(
+    note_id: str,
+    req: SnoozeRequest,
+    x_vault_token: Optional[str] = Header(default=None)
+):
+    """Set snooze reminder timestamp on note."""
+    snooze_ts = req.snooze_until if req.snooze_until is not None else (req.snoozed_until or 0)
+    async with notes_lock:
+        notes = read_notes_sync()
+        target = next((n for n in notes if n["id"] == note_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        if target.get("is_vault") and not _validate_vault_token(x_vault_token):
+            raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+        target["snoozed_until"] = snooze_ts
+        target["updated_at"] = int(time.time() * 1000)
+        _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target)
+
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "snoozed", "id": note_id}))
+    return {"status": "snoozed", "id": note_id, "snoozed_until": snooze_ts}
+
+
+@app.post("/api/notes/{note_id}/toggle-persist")
+async def toggle_persist(
+    note_id: str,
+    x_vault_token: Optional[str] = Header(default=None)
+):
+    """Toggle saved_to_disk flag for hybrid RAM/Disk persistence."""
+    async with notes_lock:
+        notes = read_notes_sync()
+        target = next((n for n in notes if n["id"] == note_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        if target.get("is_vault") and not _validate_vault_token(x_vault_token):
+            raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+        current_val = bool(target.get("saved_to_disk", False))
+        new_val = not current_val
+        target["saved_to_disk"] = new_val
+        target["updated_at"] = int(time.time() * 1000)
+        _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target, remove=(not new_val))
+
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "persist_toggled", "id": note_id}))
+    return {"id": note_id, "saved_to_disk": new_val}
 
 
 @app.post("/api/notes/{note_id}/restore")
@@ -725,7 +1024,9 @@ async def restore_note(
         target["archived"] = False
         target["updated_at"] = int(time.time() * 1000)
         _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "restored", "id": note_id}))
     return target
 
 
@@ -751,20 +1052,23 @@ async def delete_note(
             raise HTTPException(status_code=403, detail="Vault authentication required.")
 
         if forever:
-            # Permanent purge
             for att in target.get("attachments", []):
                 delete_file_on_disk(att["stored_name"])
             notes = [n for n in notes if n["id"] != note_id]
             _atomic_write(NOTES_FILE, notes)
-            return {"status": "purged", "id": note_id}
+            mirror_note_to_persist(target, remove=True)
+            action_type = "deleted_forever"
         else:
-            # Soft delete into Trash
             target["trashed"] = True
             target["deleted_at"] = now
             target["pinned"] = False
             target["updated_at"] = now
             _atomic_write(NOTES_FILE, notes)
-            return {"status": "trashed", "id": note_id}
+            mirror_note_to_persist(target)
+            action_type = "trashed"
+
+    asyncio.create_task(broadcast_event("notes_updated", {"action": action_type, "id": note_id}))
+    return {"status": action_type, "id": note_id}
 
 
 @app.delete("/api/trash")
@@ -784,11 +1088,13 @@ async def empty_trash(x_vault_token: Optional[str] = Header(default=None)):
                 purged_count += 1
                 for att in n.get("attachments", []):
                     delete_file_on_disk(att["stored_name"])
+                mirror_note_to_persist(n, remove=True)
             else:
                 kept_notes.append(n)
 
         _atomic_write(NOTES_FILE, kept_notes)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "trash_emptied", "purged_count": purged_count}))
     return {"status": "emptied", "purged_count": purged_count}
 
 
@@ -801,12 +1107,7 @@ async def batch_action(
     req: BatchActionRequest,
     x_vault_token: Optional[str] = Header(default=None)
 ):
-    """
-    Perform a batch operation on multiple notes atomically.
-    Supported actions:
-    'pin', 'unpin', 'color', 'archive', 'unarchive', 'trash', 'restore',
-    'delete_forever', 'add_tag', 'remove_tag', 'merge'
-    """
+    """Perform a batch operation on multiple notes atomically."""
     vault_ok = _validate_vault_token(x_vault_token)
     now = int(time.time() * 1000)
     target_ids = set(req.ids)
@@ -815,7 +1116,6 @@ async def batch_action(
         notes = read_notes_sync()
         matching = [n for n in notes if n["id"] in target_ids]
 
-        # Verify vault permissions if any target is in vault
         for n in matching:
             if n.get("is_vault") and not vault_ok:
                 raise HTTPException(status_code=403, detail="Vault authentication required for vault notes.")
@@ -824,57 +1124,84 @@ async def batch_action(
             for n in matching:
                 n["pinned"] = True
                 n["updated_at"] = now
+                mirror_note_to_persist(n)
         elif req.action == "unpin":
             for n in matching:
                 n["pinned"] = False
                 n["updated_at"] = now
+                mirror_note_to_persist(n)
         elif req.action == "color":
-            new_color = (req.payload or {}).get("color", "#1b1c1f")
+            if isinstance(req.payload, dict):
+                new_color = req.payload.get("color", "#1b1c1f")
+            elif isinstance(req.payload, str):
+                new_color = req.payload
+            else:
+                new_color = "#1b1c1f"
             for n in matching:
                 n["color"] = new_color
                 n["updated_at"] = now
+                mirror_note_to_persist(n)
         elif req.action == "archive":
             for n in matching:
                 n["archived"] = True
                 n["pinned"] = False
                 n["updated_at"] = now
+                mirror_note_to_persist(n)
         elif req.action == "unarchive":
             for n in matching:
                 n["archived"] = False
                 n["updated_at"] = now
+                mirror_note_to_persist(n)
         elif req.action == "trash":
             for n in matching:
                 n["trashed"] = True
                 n["deleted_at"] = now
                 n["pinned"] = False
                 n["updated_at"] = now
+                mirror_note_to_persist(n)
         elif req.action == "restore":
             for n in matching:
                 n["trashed"] = False
                 n["deleted_at"] = None
                 n["archived"] = False
                 n["updated_at"] = now
+                mirror_note_to_persist(n)
         elif req.action == "delete_forever":
             for n in matching:
                 for att in n.get("attachments", []):
                     delete_file_on_disk(att["stored_name"])
+                mirror_note_to_persist(n, remove=True)
             notes = [n for n in notes if n["id"] not in target_ids]
             _atomic_write(NOTES_FILE, notes)
+            asyncio.create_task(broadcast_event("notes_updated", {"action": "batch_deleted", "count": len(matching)}))
             return {"status": "deleted_forever", "count": len(matching)}
-        elif req.action == "add_tag":
-            tag_to_add = (req.payload or {}).get("tag", "").strip().lower()
+        elif req.action == "toggle_persist":
+            for n in matching:
+                val = not bool(n.get("saved_to_disk"))
+                n["saved_to_disk"] = val
+                n["updated_at"] = now
+                mirror_note_to_persist(n, remove=not val)
+        elif req.action in ("tag", "add_tag"):
+            if isinstance(req.payload, dict):
+                tag_to_add = req.payload.get("tag", "").strip()
+            elif isinstance(req.payload, str):
+                tag_to_add = req.payload.strip()
+            else:
+                tag_to_add = ""
             if tag_to_add:
                 for n in matching:
                     tags = set(n.get("tags", []))
                     tags.add(tag_to_add)
                     n["tags"] = sorted(list(tags))
                     n["updated_at"] = now
+                    mirror_note_to_persist(n)
         elif req.action == "remove_tag":
             tag_to_remove = (req.payload or {}).get("tag", "").strip().lower()
             if tag_to_remove:
                 for n in matching:
                     n["tags"] = [t for t in n.get("tags", []) if t != tag_to_remove]
                     n["updated_at"] = now
+                    mirror_note_to_persist(n)
         elif req.action == "merge":
             if len(matching) < 2:
                 raise HTTPException(status_code=400, detail="At least 2 notes required to merge.")
@@ -882,27 +1209,22 @@ async def batch_action(
             merged_titles = [n.get("title", "").strip() for n in matching if n.get("title", "").strip()]
             combined_title = " / ".join(merged_titles) if merged_titles else ""
 
-            # Combine texts with markdown / html separator
             merged_texts = [n.get("text", "").strip() for n in matching if n.get("text", "").strip()]
             combined_text = "<br><hr><br>".join(merged_texts)
 
-            # Combine checklists
             combined_checklist = []
             for n in matching:
                 combined_checklist.extend(n.get("checklist", []))
 
-            # Combine tags
             merged_tags = set()
             for n in matching:
                 for t in n.get("tags", []):
                     merged_tags.add(t)
 
-            # Combine attachments
             merged_attachments = []
             for n in matching:
                 merged_attachments.extend(n.get("attachments", []))
 
-            # Primary note keeps the first note's color and pinned state
             primary = matching[0]
             if combined_title:
                 primary["title"] = combined_title
@@ -912,12 +1234,17 @@ async def batch_action(
             primary["attachments"] = merged_attachments
             primary["updated_at"] = now
 
-            # Remove secondary notes (attachments are now owned by primary)
             secondary_ids = {n["id"] for n in matching[1:]}
+            for sid in secondary_ids:
+                s_note = next((n for n in notes if n["id"] == sid), None)
+                if s_note:
+                    mirror_note_to_persist(s_note, remove=True)
             notes = [n for n in notes if n["id"] not in secondary_ids]
+            mirror_note_to_persist(primary)
 
         _atomic_write(NOTES_FILE, notes)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "batch", "type": req.action}))
     return {"status": "ok", "action": req.action, "count": len(matching)}
 
 
@@ -972,6 +1299,7 @@ async def reorder_notes(req: ReorderRequest):
             if n["id"] in id_to_order:
                 n["sort_order"] = id_to_order[n["id"]]
         _atomic_write(NOTES_FILE, notes)
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "reordered"}))
     return {"status": "reordered"}
 
 
@@ -1007,7 +1335,9 @@ async def add_attachments(
         target.setdefault("attachments", []).extend(uploaded)
         target["updated_at"] = int(time.time() * 1000)
         _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "attachments_added", "id": note_id}))
     return target
 
 
@@ -1042,7 +1372,9 @@ async def delete_attachment(
             delete_file_on_disk(to_delete)
 
         _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "attachment_deleted", "id": note_id}))
     return target
 
 
@@ -1053,11 +1385,7 @@ async def serve_file(
     x_vault_token: Optional[str] = Header(default=None),
     token: Optional[str] = Query(default=None)
 ):
-    """
-    Stream attachment file:
-    - By default renders inline for images/audio/video preview.
-    - If download=True: serves as Content-Disposition: attachment.
-    """
+    """Stream attachment file inline or as download."""
     v_token = x_vault_token or token
     async with notes_lock:
         notes = read_notes_sync()
@@ -1081,7 +1409,14 @@ async def serve_file(
 
     file_path = os.path.join(FILES_DIR, target_att["stored_name"])
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File missing on disk.")
+        if is_persist_available():
+            p_path = os.path.join(PERSIST_FILES_DIR, target_att["stored_name"])
+            if os.path.exists(p_path):
+                file_path = p_path
+            else:
+                raise HTTPException(status_code=404, detail="File missing on disk.")
+        else:
+            raise HTTPException(status_code=404, detail="File missing on disk.")
 
     content_type = target_att.get("content_type") or "application/octet-stream"
     disp_type = "attachment" if download else "inline"
@@ -1138,7 +1473,10 @@ async def transfer_attachment(
         target["updated_at"] = now
 
         _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(source)
+        mirror_note_to_persist(target)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "transferred", "target_id": target_id}))
     return {"status": "transferred", "attachment": att_to_move, "target_id": target_id}
 
 
@@ -1176,7 +1514,9 @@ async def rename_attachment(
         target["updated_at"] = now
 
         _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "renamed_attachment", "id": note_id}))
     return {"status": "renamed", "attachment": target_att}
 
 
@@ -1278,7 +1618,6 @@ async def extract_zip_file(
 
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
-            # Zip-slip protection
             target_info = next((i for i in zf.infolist() if i.filename == path and not i.is_dir()), None)
             if not target_info:
                 raise HTTPException(status_code=404, detail="File not found in archive.")
@@ -1412,6 +1751,8 @@ async def direct_drop(
         "deleted_at": None,
         "expires_at": 0,
         "is_vault": False,
+        "saved_to_disk": False,
+        "snoozed_until": 0,
         "checklist": [],
         "tags": tags,
         "attachments": attachments,
@@ -1425,6 +1766,7 @@ async def direct_drop(
         notes.insert(0, new_note)
         _atomic_write(NOTES_FILE, notes)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "cli_dropped", "id": note_id}))
     return {
         "status": "ok",
         "id": note_id,
@@ -1459,7 +1801,7 @@ async def get_link_preview(url: str = Query(...)):
                 content_type = resp.headers.get_content_type()
                 if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
                     return None, None
-                chunk = resp.read(65536)  # Read at most 64KB for metadata
+                chunk = resp.read(65536)
                 charset = resp.headers.get_content_charset() or "utf-8"
                 return chunk.decode(charset, errors="ignore"), resp.geturl()
 
@@ -1520,12 +1862,10 @@ async def export_backup():
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Add metadata JSONs
         zf.writestr("notes.json", json.dumps(notes_data, indent=2, ensure_ascii=False))
         if vault_data:
             zf.writestr("vault.json", json.dumps(vault_data, indent=2, ensure_ascii=False))
 
-        # Add all physical files
         if os.path.exists(FILES_DIR):
             for fname in os.listdir(FILES_DIR):
                 fpath = os.path.join(FILES_DIR, fname)
@@ -1557,7 +1897,6 @@ async def restore_backup(file: UploadFile = File(...)):
 
         with zipfile.ZipFile(zip_buffer, "r") as zf:
             for member in zf.namelist():
-                # Restore files/
                 if member.startswith("files/") and not member.endswith("/"):
                     fname = os.path.basename(member)
                     if fname:
@@ -1565,13 +1904,11 @@ async def restore_backup(file: UploadFile = File(...)):
                         with zf.open(member) as src, open(out_path, "wb") as dst:
                             shutil.copyfileobj(src, dst)
 
-                # Restore vault.json if present and not currently configured
                 elif member == "vault.json" and not os.path.exists(VAULT_FILE):
                     vault_bytes = zf.read(member)
                     with open(VAULT_FILE, "wb") as dst:
                         dst.write(vault_bytes)
 
-            # Merge notes.json
             if "notes.json" in zf.namelist():
                 raw = zf.read("notes.json").decode("utf-8")
                 imported = json.loads(raw)
@@ -1583,6 +1920,7 @@ async def restore_backup(file: UploadFile = File(...)):
 
         _atomic_write(NOTES_FILE, existing_notes)
 
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "restored_backup"}))
     return {"status": "restored", "restored_notes_count": restored_notes_count, "total_notes": len(existing_notes)}
 
 
