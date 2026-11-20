@@ -9,10 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apk add --no-cache curl
 
 # Create non-root user and group (UID 1000, GID 1000)
-RUN addgroup -g 1000 scratchpad && \
-    adduser -u 1000 -G scratchpad -s /bin/sh -D scratchpad && \
+RUN addgroup -g 1000 keepboard && \
+    adduser -u 1000 -G keepboard -s /bin/sh -D keepboard && \
     mkdir -p /app /data/files && \
-    chown -R scratchpad:scratchpad /app /data
+    chown -R keepboard:keepboard /app /data
 
 WORKDIR /app
 
@@ -21,7 +21,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source
-COPY --chown=scratchpad:scratchpad app/ /app/
+COPY --chown=keepboard:keepboard app/ /app/
 
 # Switch to UID/GID 1000:1000
 USER 1000:1000

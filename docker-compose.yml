@@ -1,9 +1,9 @@
 services:
-  scratchpad:
+  keepboard:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: scratchpad
+    container_name: keepboard
     restart: unless-stopped
     tmpfs:
       - "/data:size=1G,uid=1000,gid=1000,mode=0755"

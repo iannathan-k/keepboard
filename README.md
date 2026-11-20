@@ -1,57 +1,59 @@
-# RAM Scratchpad (Google Keep Style)
+# KeepBoard
 
-A minimalist, high-speed, self-hosted scratchpad and arbitrary file-parking web application designed to run entirely in RAM as a lightweight Docker container mounted on a `tmpfs` RAM disk.
+A minimalist, high-speed, self-hosted Google Keep–style scratchpad and arbitrary file-parking web application designed to run entirely in RAM as a single lightweight Docker container mounted on a `tmpfs` RAM disk.
 
-Zero social-media clutter. Zero folder sidebars. Zero user authentication friction. Cold boots directly into a ready-to-use board.
+Zero social-media clutter. Zero account registration friction. Instant cold boots into a production-ready board.
 
 ---
 
-## Features
+## What's New in KeepBoard v2
 
-- **Google Keep Aesthetic & UX**:
-  - Clean dark mode (`#131314` background, `#1e1f22` cards, `#33353a` subtle borders, `#8ab4f8` accent).
-  - Responsive multi-column CSS masonry grid (`columns: 4 260px`).
-  - Distinct **PINNED** and **OTHERS** sections.
-  - 6 subtle dark-mode color swatches (Default, Coral, Amber, Olive, Teal, Slate, Purple) with matched borders.
-- **Zero-Friction Top Capture Bar**:
-  - Always-ready centered "Take a note..." input box.
-  - Auto-expanding textarea—no title field required.
-  - `Ctrl+Enter` or `Cmd+Enter` creates cards instantly.
-- **Arbitrary File Parking & Downloads**:
-  - **Zero file-type or MIME filtering**: accepts `.cmir`, `.zip`, `.jar`, `.docx`, `.py`, `.bin`, raw firmware dumps, and extensionless binary blobs.
-  - **Streamed file uploads**: writes chunks directly to disk to prevent RAM bloat on multi-hundred-MB files.
-  - Original filenames and exact byte sizes preserved in download headers (`Content-Disposition: attachment`).
-  - Interactive attachment pills with human-readable file sizes (`KB`, `MB`, `GB`).
-- **Instant Drag-and-Drop Anywhere**:
-  - Dragging files over the window displays a fullscreen drop overlay.
-  - Dropping creates a new note card immediately with zero confirmation dialogs (or attaches directly if a note is currently open in the edit modal).
-  - Clipboard file pasting (`Ctrl+V` / `Cmd+V`) support.
-- **Card Interactions & Formatting**:
-  - Auto-linkifies URLs into clickable `target="_blank"` links.
-  - Formats markdown code fences (` ``` `) with monospace font and a one-click "Copy" button.
-  - Preserves exact whitespace and newlines (`white-space: pre-wrap`).
-  - Quick action buttons on card hover: Color Picker, Attach Files, Copy Note Text, Delete Note.
-  - Inline modal editor for editing note text, adding files, and deleting individual attachments.
-- **Live Instant Search**:
-  - Single search bar at the top that filters cards in real time across note body text and attached filenames. Press `/` anywhere to focus search.
-- **Ephemeral RAM Disk Architecture**:
-  - Configured to run on `/data` mounted as a 1GB `tmpfs` RAM disk.
-  - Atomic write-and-replace for `notes.json` (`.tmp` + `fsync` + `replace`).
-  - Alpine-based image running as unprivileged UID/GID `1000:1000` on port `8080`.
+- **Google Keep Layout & Collapsible Left Navigation**:
+  - Left navigation sidebar featuring **Notes**, **Archive**, **Trash**, **Vault**, and dynamic **Labels/Tags**.
+  - Collapses smoothly to an icon rail or expands to full pill navigation on desktop; responsive mobile drawer.
+  - Centered pill search bar across the top viewport with instant filtering and `/` shortcut.
+  - Real-time RAM & tmpfs metrics pill (`14.2 MB / 1 GB RAM`).
+- **Cohesive Modern Dark UI & 8-Color Palette**:
+  - `#131314` canvas, `#1b1c1f` elevated cards, `#24262a` hover surfaces, and 12px rounded corners with soft borders (`rgba(255, 255, 255, 0.08)`).
+  - 8-color dark-mode palette with harmonizing border tints: Default Dark, Coral, Amber, Sand, Olive, Teal, Slate, Purple.
+- **Multi-Select & Floating Batch Action Bar**:
+  - Selection checkmark circles on top-left of cards, `Shift+Click` range selection, and `Cmd/Ctrl+A` select all visible.
+  - Contextual floating batch bar: Batch Pin/Unpin, Batch Color, Batch Tagging, Batch Archive, Batch Merge into one note, Batch Download all attachments as `.zip`, and Batch Trash/Delete.
+- **7-Day Auto-Purging Trash Bin**:
+  - Soft delete: notes move to Trash with `deleted_at` timestamp without unlinking files.
+  - Countdown badges on cards (e.g. `🗑 Purges in 6d`).
+  - Automatic background pruning every hour and on startup for notes in Trash older than 7 days (604,800s).
+  - One-click "Empty Trash Now" button to immediately reclaim tmpfs RAM.
+- **Nested Indentation Support**:
+  - Regular Notes: `Tab` inserts 4 spaces / indents current lines; `Shift+Tab` outdents without losing focus.
+  - Checklists: Indented sub-items (`indent: 0, 1, 2, 3`) with `Tab`/`Shift+Tab` and cascading check/uncheck states.
+- **Inline Media Previews**:
+  - Images (`.png`, `.jpg`, `.webp`, `.gif`, `.svg`), audio (`.mp3`, `.wav`, `.ogg`), and video (`.mp4`, `.webm`) render clean thumbnails and players directly on cards.
+  - Non-media binary files (`.cmir`, `.zip`, `.jar`, `.bin`, `.py`, `.docx`, etc.) render as attachment download pills with no file-type restrictions.
+- **Note Duplication & Card Merging**:
+  - "Make a copy" action creates an instant clone of any note and its checklist/tags.
+  - "Merge Selected" combines multiple notes, checklists, tags, and files into a single consolidated card.
+- **Auto-Expiring Ephemeral Notes ("Burn After...")**:
+  - Set TTL (1 hour, 24 hours, 7 days) on sensitive scratchpads or file drops with countdown badges; automatically purged from RAM when expired.
+- **Password-Protected Vault**:
+  - Dedicated PBKDF2-SHA256 protected vault for sensitive notes and file drops. Completely excluded from non-vault views and search unless unlocked.
+- **One-Click Backup Export & Restore**:
+  - Export full `.zip` bundle containing `notes.json`, `vault.json`, and all `/data/files/`.
+  - Import `.zip` backup to restore notes and files smoothly.
 
 ---
 
 ## Project Structure
 
 ```
-ram-scratchpad/
-├── Dockerfile              # Minimal Alpine-based image (UID/GID 1000:1000, port 8080)
+keepboard/
+├── Dockerfile              # Alpine-based image (UID/GID 1000:1000, port 8080)
 ├── docker-compose.yml      # Service with tmpfs mount and proxy-net external network
 ├── requirements.txt        # FastAPI, Uvicorn, Python-Multipart
 ├── app/
 │   ├── main.py             # FastAPI backend with chunked streaming and atomic persistence
 │   └── static/
-│       └── index.html      # Self-contained Google Keep SPA (HTML5, CSS3, Vanilla JS)
+│       └── index.html      # Modern SPA frontend (HTML5, CSS3, Vanilla JS)
 └── README.md
 ```
 
@@ -78,9 +80,9 @@ The container starts with:
 ### 3. Nginx Proxy Manager Setup
 In the Nginx Proxy Manager UI:
 1. **Add Proxy Host**:
-   - **Domain Names**: `scratchpad.your-domain.lan` (or internal hostname)
+   - **Domain Names**: `keepboard.your-domain.lan` (or internal hostname)
    - **Scheme**: `http`
-   - **Forward Hostname / IP**: `scratchpad` (resolves via Docker DNS on `proxy-net`)
+   - **Forward Hostname / IP**: `keepboard` (resolves via Docker DNS on `proxy-net`)
    - **Forward Port**: `8080`
    - **Cache Assets**: Off
    - **Block Common Exploits**: On
@@ -99,7 +101,7 @@ If you wish to test the container standalone with a host port mapped:
 
 ```bash
 docker run -d \
-  --name scratchpad-test \
+  --name keepboard-test \
   -p 8080:8080 \
   --tmpfs /data:size=1G,uid=1000,gid=1000,mode=0755 \
   $(docker build -q .)
@@ -112,11 +114,22 @@ Then open your browser to `http://localhost:8080`.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/health` | Health check endpoint returning storage path and note count |
-| `GET` | `/api/notes` | List all notes (sorted by pinned first, then updated time) |
-| `POST` | `/api/notes` | Create a note (accepts `multipart/form-data` with `text`, `color`, `pinned`, and multiple `files`) |
-| `PUT` | `/api/notes/{id}` | Update text, color, or pin state of a note |
-| `DELETE` | `/api/notes/{id}` | Delete a note and purge all its associated files from `/data/files/` |
-| `POST` | `/api/notes/{id}/attachments` | Stream upload arbitrary files to attach to an existing note |
-| `DELETE` | `/api/notes/{id}/attachments/{att_id}` | Remove a single attachment from a note and disk |
-| `GET` | `/api/files/{att_id}` | Download attachment with original filename preserved |
+| `GET` | `/api/health` | Health check endpoint |
+| `GET` | `/api/stats` | Storage and RAM tmpfs utilization metrics |
+| `GET` | `/api/notes?view={notes\|archive\|trash\|vault}` | List notes filtered by view |
+| `POST` | `/api/notes` | Create a note (accepts multipart text, color, files, checklist, tags, TTL) |
+| `PUT` | `/api/notes/{id}` | Update text, color, pin, archive, checklist, or tags |
+| `POST` | `/api/notes/{id}/duplicate` | Make a copy of a note |
+| `POST` | `/api/notes/{id}/restore` | Restore note from Trash |
+| `DELETE` | `/api/notes/{id}?forever={false\|true}` | Soft delete to Trash (`forever=false`) or permanent purge (`forever=true`) |
+| `DELETE` | `/api/trash` | Empty Trash (permanently deletes all trashed notes and files) |
+| `POST` | `/api/notes/batch` | Perform batch operations: pin, unpin, color, archive, trash, delete_forever, merge |
+| `POST` | `/api/notes/batch/download` | Stream `.zip` bundle of all attachments across selected notes |
+| `POST` | `/api/notes/reorder` | Persist custom drag-to-reorder note sort order |
+| `GET` | `/api/files/{att_id}` | Stream file inline (preview for image/audio/video) or download |
+| `GET` | `/api/backup/export` | Stream full `.zip` backup bundle |
+| `POST` | `/api/backup/restore` | Restore notes and files from `.zip` backup |
+| `GET` | `/api/vault/status` | Check if vault password is configured |
+| `POST` | `/api/vault/setup` | Set master password for vault |
+| `POST` | `/api/vault/unlock` | Unlock vault session (returns session token) |
+| `POST` | `/api/vault/lock` | Lock vault session |
