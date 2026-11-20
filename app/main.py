@@ -10,6 +10,11 @@ import secrets
 import hashlib
 import asyncio
 import mimetypes
+import socket
+import ipaddress
+import urllib.request
+import urllib.parse
+import html.parser
 from datetime import datetime
 from typing import Optional, List, Any
 from contextlib import asynccontextmanager
@@ -37,6 +42,10 @@ SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 
 # Concurrency lock for notes.json operations
 notes_lock = asyncio.Lock()
+
+# In-memory cache for link previews
+link_preview_cache: dict[str, dict] = {}
+MAX_LINK_CACHE = 500
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +93,84 @@ def read_vault_meta() -> dict:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
     except Exception:
-        return []
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Safe HTML Sanitizer
+# ---------------------------------------------------------------------------
+
+class SafeHTMLSanitizer(html.parser.HTMLParser):
+    ALLOWED_TAGS = {
+        'p', 'br', 'div', 'span', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'del',
+        'mark', 'code', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'ul', 'ol', 'li', 'a', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'
+    }
+    DROP_TAGS = {'script', 'style', 'iframe', 'object', 'embed', 'applet', 'meta', 'link'}
+    VOID_TAGS = {'br', 'hr'}
+
+    def __init__(self):
+        super().__init__()
+        self.result = []
+        self.drop_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in self.DROP_TAGS:
+            self.drop_depth += 1
+            return
+        if self.drop_depth > 0:
+            return
+        if tag not in self.ALLOWED_TAGS:
+            return
+        clean_attrs = []
+        for k, v in attrs:
+            k = k.lower()
+            if k.startswith('on') or k in {'data', 'srcdoc'}:
+                continue
+            if tag == 'a' and k == 'href':
+                v_clean = v.strip().lower()
+                if v_clean.startswith(('http://', 'https://', 'mailto:', '/')):
+                    clean_attrs.append((k, v.strip()))
+            elif tag in {'mark', 'span'} and k == 'style':
+                styles = [s.strip() for s in v.split(';') if s.strip()]
+                safe_styles = [s for s in styles if s.split(':')[0].strip().lower() in {'background-color', 'color', 'font-size', 'font-weight', 'text-decoration'}]
+                if safe_styles:
+                    clean_attrs.append(('style', '; '.join(safe_styles)))
+            elif k in {'class', 'title'}:
+                clean_attrs.append((k, v.strip()))
+        if tag == 'a':
+            clean_attrs.append(('target', '_blank'))
+            clean_attrs.append(('rel', 'noopener noreferrer'))
+        attr_str = ''.join(f' {k}="{v}"' for k, v in clean_attrs)
+        self.result.append(f'<{tag}{attr_str}>')
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in self.DROP_TAGS:
+            if self.drop_depth > 0:
+                self.drop_depth -= 1
+            return
+        if self.drop_depth > 0:
+            return
+        if tag in self.ALLOWED_TAGS and tag not in self.VOID_TAGS:
+            self.result.append(f'</{tag}>')
+
+    def handle_data(self, data):
+        if self.drop_depth == 0:
+            self.result.append(data)
+
+
+def sanitize_html(raw: str) -> str:
+    """Sanitize HTML note body to safe formatting elements, stripping scripts and malicious styles."""
+    if not raw:
+        return ""
+    p = SafeHTMLSanitizer()
+    try:
+        p.feed(raw)
+        return "".join(p.result)
+    except Exception:
+        return raw.replace("<", "&lt;").replace(">", "&gt;")
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +218,16 @@ def delete_file_on_disk(stored_name: str):
             pass
 
 
+def format_bytes_py(bytes_val: int) -> str:
+    if not bytes_val or bytes_val == 0:
+        return "0 B"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if bytes_val < 1024.0:
+            return f"{bytes_val:.1f} {unit}".replace(".0 ", " ")
+        bytes_val /= 1024.0
+    return f"{bytes_val:.1f} PB"
+
+
 # ---------------------------------------------------------------------------
 # Vault Security Helpers
 # ---------------------------------------------------------------------------
@@ -161,6 +257,77 @@ def _validate_vault_token(token: Optional[str]) -> bool:
         vault_sessions.pop(token, None)
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# SSRF-Protected Link Preview Scraper
+# ---------------------------------------------------------------------------
+
+class HTMLMetaScraper(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_title = False
+        self.title = ""
+        self.meta_title = ""
+        self.og_title = ""
+        self.meta_desc = ""
+        self.og_desc = ""
+        self.og_image = ""
+        self.favicon = ""
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        attr_dict = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "title":
+            self.in_title = True
+        elif tag == "meta":
+            prop = attr_dict.get("property", "").lower()
+            name = attr_dict.get("name", "").lower()
+            content = attr_dict.get("content", "").strip()
+            if prop == "og:title":
+                self.og_title = content
+            elif name == "title":
+                self.meta_title = content
+            elif prop == "og:description":
+                self.og_desc = content
+            elif name == "description":
+                self.meta_desc = content
+            elif prop == "og:image":
+                self.og_image = content
+        elif tag == "link":
+            rel = attr_dict.get("rel", "").lower()
+            if "icon" in rel and not self.favicon:
+                self.favicon = attr_dict.get("href", "").strip()
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "title":
+            self.in_title = False
+
+    def handle_data(self, data):
+        if self.in_title and not self.title:
+            self.title = data.strip()
+
+
+def check_url_ssrf_safety(url_str: str) -> urllib.parse.ParseResult:
+    """Validate URL and resolve DNS to disallow private, loopback, and local network IPs."""
+    parsed = urllib.parse.urlparse(url_str)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http and https URLs are allowed.")
+    hostname = parsed.hostname
+    if not hostname:
+        raise HTTPException(status_code=400, detail="Invalid URL hostname.")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        addr_info = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        for family, socktype, proto, canonname, sockaddr in addr_info:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                raise HTTPException(status_code=403, detail="Forbidden: Private, local, and reserved network targets are blocked.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to resolve hostname: {str(e)}")
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +399,7 @@ app = FastAPI(title="KeepBoard", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 
 class NoteUpdateRequest(BaseModel):
+    title: Optional[str] = None
     text: Optional[str] = None
     color: Optional[str] = None
     pinned: Optional[bool] = None
@@ -267,13 +435,22 @@ class VaultUnlockRequest(BaseModel):
     password: str
 
 
+class TransferAttachmentRequest(BaseModel):
+    source_note_id: str
+    attachment_id: str
+
+
+class RenameAttachmentRequest(BaseModel):
+    filename: str
+
+
 # ---------------------------------------------------------------------------
 # API: System Health & Stats
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "healthy", "service": "KeepBoard", "data_dir": DATA_DIR}
+    return {"status": "healthy", "service": "KeepBoard", "version": "3.0.0", "data_dir": DATA_DIR}
 
 
 @app.get("/api/stats")
@@ -361,6 +538,7 @@ async def get_notes(
 
 @app.post("/api/notes")
 async def create_note(
+    title: str = Form(""),
     text: str = Form(""),
     color: str = Form("#1b1c1f"),
     pinned: bool = Form(False),
@@ -373,42 +551,54 @@ async def create_note(
     x_vault_token: Optional[str] = Header(default=None)
 ):
     """Create a new note with arbitrary binary attachments and optional checklist/TTL."""
-    if is_vault and not _validate_vault_token(x_vault_token):
+    is_vault_bool = bool(is_vault) if isinstance(is_vault, bool) else bool(getattr(is_vault, "default", False))
+    pinned_bool = bool(pinned) if isinstance(pinned, bool) else bool(getattr(pinned, "default", False))
+    archived_bool = bool(archived) if isinstance(archived, bool) else bool(getattr(archived, "default", False))
+
+    if is_vault_bool and not _validate_vault_token(x_vault_token):
         raise HTTPException(status_code=403, detail="Vault authentication required to create vault notes.")
 
     now = int(time.time() * 1000)
     note_id = uuid.uuid4().hex
 
     attachments = []
-    for file in files:
-        if file.filename:
-            att = await save_uploaded_file(file)
-            attachments.append(att)
+    if isinstance(files, list):
+        for file in files:
+            if hasattr(file, "filename") and file.filename:
+                att = await save_uploaded_file(file)
+                attachments.append(att)
 
     parsed_tags = []
+    tags_str = tags if isinstance(tags, str) else getattr(tags, "default", "[]")
     try:
-        parsed_tags = json.loads(tags) if tags else []
+        parsed_tags = json.loads(tags_str) if tags_str else []
     except Exception:
         parsed_tags = []
 
     parsed_checklist = []
+    checklist_str = checklist if isinstance(checklist, str) else getattr(checklist, "default", "[]")
     try:
-        parsed_checklist = json.loads(checklist) if checklist else []
+        parsed_checklist = json.loads(checklist_str) if checklist_str else []
     except Exception:
         parsed_checklist = []
 
-    expires_at = (now + expires_in * 1000) if expires_in > 0 else 0
+    exp_val = expires_in if isinstance(expires_in, int) else getattr(expires_in, "default", 0)
+    expires_at = (now + exp_val * 1000) if exp_val > 0 else 0
+    note_title = title if isinstance(title, str) else getattr(title, "default", "")
+    note_text = text if isinstance(text, str) else getattr(text, "default", "")
+    note_color = color if isinstance(color, str) else getattr(color, "default", "#1b1c1f")
 
     new_note = {
         "id": note_id,
-        "text": text or "",
-        "color": color or "#1b1c1f",
-        "pinned": bool(pinned),
-        "archived": bool(archived),
+        "title": (note_title or "").strip(),
+        "text": sanitize_html(note_text) if note_text else "",
+        "color": note_color or "#1b1c1f",
+        "pinned": pinned_bool,
+        "archived": archived_bool,
         "trashed": False,
         "deleted_at": None,
         "expires_at": expires_at,
-        "is_vault": bool(is_vault),
+        "is_vault": is_vault_bool,
         "checklist": parsed_checklist,
         "tags": parsed_tags,
         "attachments": attachments,
@@ -443,12 +633,12 @@ async def duplicate_note(
         now = int(time.time() * 1000)
         copy_note = dict(source)
         copy_note["id"] = uuid.uuid4().hex
+        copy_note["title"] = source.get("title", "")
         copy_note["created_at"] = now
         copy_note["updated_at"] = now
-        # Deepcopy checklist and tags
+        # Deepcopy checklist, tags, and attachments
         copy_note["checklist"] = [dict(it) for it in source.get("checklist", [])]
         copy_note["tags"] = list(source.get("tags", []))
-        # Share attachments (same files on disk, or duplicate attachment records)
         copy_note["attachments"] = [dict(att) for att in source.get("attachments", [])]
 
         notes.insert(0, copy_note)
@@ -467,7 +657,7 @@ async def update_note(
     payload: NoteUpdateRequest,
     x_vault_token: Optional[str] = Header(default=None)
 ):
-    """Update fields on a note."""
+    """Update fields on a note with HTML sanitization."""
     now = int(time.time() * 1000)
     async with notes_lock:
         notes = read_notes_sync()
@@ -478,8 +668,10 @@ async def update_note(
         if (target.get("is_vault") or payload.is_vault) and not _validate_vault_token(x_vault_token):
             raise HTTPException(status_code=403, detail="Vault authentication required.")
 
+        if payload.title is not None:
+            target["title"] = payload.title.strip()
         if payload.text is not None:
-            target["text"] = payload.text
+            target["text"] = sanitize_html(payload.text)
         if payload.color is not None:
             target["color"] = payload.color
         if payload.pinned is not None:
@@ -687,9 +879,12 @@ async def batch_action(
             if len(matching) < 2:
                 raise HTTPException(status_code=400, detail="At least 2 notes required to merge.")
 
-            # Combine texts with markdown separators
+            merged_titles = [n.get("title", "").strip() for n in matching if n.get("title", "").strip()]
+            combined_title = " / ".join(merged_titles) if merged_titles else ""
+
+            # Combine texts with markdown / html separator
             merged_texts = [n.get("text", "").strip() for n in matching if n.get("text", "").strip()]
-            combined_text = "\n\n---\n\n".join(merged_texts)
+            combined_text = "<br><hr><br>".join(merged_texts)
 
             # Combine checklists
             combined_checklist = []
@@ -709,6 +904,8 @@ async def batch_action(
 
             # Primary note keeps the first note's color and pinned state
             primary = matching[0]
+            if combined_title:
+                primary["title"] = combined_title
             primary["text"] = combined_text
             primary["checklist"] = combined_checklist
             primary["tags"] = sorted(list(merged_tags))
@@ -747,7 +944,6 @@ async def batch_download(
                 file_path = os.path.join(FILES_DIR, att["stored_name"])
                 if os.path.exists(file_path):
                     orig_name = att.get("filename", "file.bin")
-                    # Handle duplicate filenames in the zip
                     arcname = orig_name
                     counter = 1
                     while arcname in seen_names:
@@ -855,7 +1051,7 @@ async def serve_file(
     attachment_id: str,
     download: bool = Query(False),
     x_vault_token: Optional[str] = Header(default=None),
-    token: Optional[str] = Query(default=None)  # Query param support for <img>/<video> tags
+    token: Optional[str] = Query(default=None)
 ):
     """
     Stream attachment file:
@@ -897,6 +1093,418 @@ async def serve_file(
         content_disposition_type=disp_type,
         filename=safe_filename
     )
+
+
+# ---------------------------------------------------------------------------
+# API: Cross-Card Attachment Transfer & Inline Renaming
+# ---------------------------------------------------------------------------
+
+@app.post("/api/notes/{target_id}/transfer-attachment")
+async def transfer_attachment(
+    target_id: str,
+    req: TransferAttachmentRequest,
+    x_vault_token: Optional[str] = Header(default=None)
+):
+    """Transfer an attachment from a source note directly to a target note without re-uploading."""
+    vault_ok = _validate_vault_token(x_vault_token)
+    now = int(time.time() * 1000)
+
+    async with notes_lock:
+        notes = read_notes_sync()
+        source = next((n for n in notes if n["id"] == req.source_note_id), None)
+        target = next((n for n in notes if n["id"] == target_id), None)
+
+        if not source or not target:
+            raise HTTPException(status_code=404, detail="Source or target note not found.")
+
+        if (source.get("is_vault") or target.get("is_vault")) and not vault_ok:
+            raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+        att_to_move = None
+        new_source_atts = []
+        for att in source.get("attachments", []):
+            if att["id"] == req.attachment_id:
+                att_to_move = att
+            else:
+                new_source_atts.append(att)
+
+        if not att_to_move:
+            raise HTTPException(status_code=404, detail="Attachment not found in source note.")
+
+        source["attachments"] = new_source_atts
+        source["updated_at"] = now
+
+        target.setdefault("attachments", []).append(att_to_move)
+        target["updated_at"] = now
+
+        _atomic_write(NOTES_FILE, notes)
+
+    return {"status": "transferred", "attachment": att_to_move, "target_id": target_id}
+
+
+@app.put("/api/notes/{note_id}/attachments/{attachment_id}/rename")
+async def rename_attachment(
+    note_id: str,
+    attachment_id: str,
+    req: RenameAttachmentRequest,
+    x_vault_token: Optional[str] = Header(default=None)
+):
+    """Rename an attachment display filename."""
+    if not req.filename or not req.filename.strip():
+        raise HTTPException(status_code=400, detail="Filename cannot be empty.")
+
+    clean_filename = os.path.basename(req.filename.strip())
+    now = int(time.time() * 1000)
+
+    async with notes_lock:
+        notes = read_notes_sync()
+        target = next((n for n in notes if n["id"] == note_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Note not found.")
+
+        if target.get("is_vault") and not _validate_vault_token(x_vault_token):
+            raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+        target_att = next((a for a in target.get("attachments", []) if a["id"] == attachment_id), None)
+        if not target_att:
+            raise HTTPException(status_code=404, detail="Attachment not found.")
+
+        target_att["filename"] = clean_filename
+        guessed_type, _ = mimetypes.guess_type(clean_filename)
+        if guessed_type:
+            target_att["content_type"] = guessed_type
+        target["updated_at"] = now
+
+        _atomic_write(NOTES_FILE, notes)
+
+    return {"status": "renamed", "attachment": target_att}
+
+
+# ---------------------------------------------------------------------------
+# API: ZIP / JAR Archive Peek & Extract
+# ---------------------------------------------------------------------------
+
+@app.get("/api/files/{attachment_id}/zip-list")
+async def get_zip_list(
+    attachment_id: str,
+    x_vault_token: Optional[str] = Header(default=None),
+    token: Optional[str] = Query(default=None)
+):
+    """Peek inside a ZIP or JAR archive, listing files and sizes without downloading."""
+    v_token = x_vault_token or token
+    async with notes_lock:
+        notes = read_notes_sync()
+
+    target_att = None
+    is_vault = False
+    for n in notes:
+        for att in n.get("attachments", []):
+            if att["id"] == attachment_id:
+                target_att = att
+                is_vault = bool(n.get("is_vault"))
+                break
+        if target_att:
+            break
+
+    if not target_att:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+
+    if is_vault and not _validate_vault_token(v_token):
+        raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+    file_path = os.path.join(FILES_DIR, target_att["stored_name"])
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File missing on disk.")
+
+    if not zipfile.is_zipfile(file_path):
+        raise HTTPException(status_code=400, detail="File is not a valid ZIP or JAR archive.")
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            items = []
+            for info in zf.infolist():
+                items.append({
+                    "path": info.filename,
+                    "size": info.file_size,
+                    "compress_size": info.compress_size,
+                    "is_dir": info.is_dir()
+                })
+        return {
+            "attachment_id": attachment_id,
+            "filename": target_att.get("filename", "archive.zip"),
+            "files": items,
+            "total_files": len(items)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read archive: {str(e)}")
+
+
+@app.get("/api/files/{attachment_id}/zip-extract")
+async def extract_zip_file(
+    attachment_id: str,
+    path: str = Query(...),
+    download: bool = Query(True),
+    x_vault_token: Optional[str] = Header(default=None),
+    token: Optional[str] = Query(default=None)
+):
+    """Extract and stream a single file directly from a ZIP or JAR archive."""
+    v_token = x_vault_token or token
+    async with notes_lock:
+        notes = read_notes_sync()
+
+    target_att = None
+    is_vault = False
+    for n in notes:
+        for att in n.get("attachments", []):
+            if att["id"] == attachment_id:
+                target_att = att
+                is_vault = bool(n.get("is_vault"))
+                break
+        if target_att:
+            break
+
+    if not target_att:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+
+    if is_vault and not _validate_vault_token(v_token):
+        raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+    file_path = os.path.join(FILES_DIR, target_att["stored_name"])
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File missing on disk.")
+
+    if not zipfile.is_zipfile(file_path):
+        raise HTTPException(status_code=400, detail="File is not a valid ZIP or JAR archive.")
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            # Zip-slip protection
+            target_info = next((i for i in zf.infolist() if i.filename == path and not i.is_dir()), None)
+            if not target_info:
+                raise HTTPException(status_code=404, detail="File not found in archive.")
+
+            file_bytes = zf.read(target_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to extract file: {str(e)}")
+
+    guessed_type, _ = mimetypes.guess_type(path)
+    ct = guessed_type or "application/octet-stream"
+    disp = "attachment" if download else "inline"
+    safe_name = os.path.basename(path) or "extracted.bin"
+
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type=ct,
+        headers={"Content-Disposition": f'{disp}; filename="{safe_name}"'}
+    )
+
+
+# ---------------------------------------------------------------------------
+# API: Direct CLI / Piping Drop Endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/api/drop")
+async def direct_drop(
+    request: Request,
+    x_title: Optional[str] = Header(default=None),
+    x_filename: Optional[str] = Header(default=None),
+    x_vault_token: Optional[str] = Header(default=None),
+    title: Optional[str] = Query(default=None)
+):
+    """
+    Direct CLI / Piping File & Text drop endpoint.
+    Supports:
+    - curl -F "file=@dump.log" https://.../api/drop
+    - cat report.txt | curl -X POST --data-binary @- -H "Content-Type: text/plain" https://.../api/drop
+    - curl -F "text=Meeting notes..." -F "title=Sync" https://.../api/drop
+    """
+    now = int(time.time() * 1000)
+    content_type = request.headers.get("content-type", "")
+
+    note_title = (x_title or title or "").strip()
+    note_text = ""
+    attachments = []
+    tags = []
+    color = "#1b1c1f"
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        form_title = form.get("title")
+        if form_title and not note_title:
+            note_title = str(form_title).strip()
+        form_text = form.get("text")
+        if form_text:
+            note_text = sanitize_html(str(form_text))
+        form_color = form.get("color")
+        if form_color:
+            color = str(form_color).strip()
+        form_tags = form.get("tags")
+        if form_tags:
+            try:
+                parsed = json.loads(str(form_tags))
+                if isinstance(parsed, list):
+                    tags = parsed
+                else:
+                    tags = [str(form_tags).strip()]
+            except Exception:
+                tags = [t.strip() for t in str(form_tags).split(",") if t.strip()]
+
+        for key in ("file", "files"):
+            val = form.getlist(key) if hasattr(form, "getlist") else [form.get(key)]
+            for item in val:
+                if isinstance(item, UploadFile) and item.filename:
+                    att = await save_uploaded_file(item)
+                    attachments.append(att)
+
+        if not note_title and not note_text and attachments:
+            note_title = attachments[0]["filename"]
+        elif not note_title:
+            note_title = f"CLI Drop - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+    else:
+        raw_body = await request.body()
+        if not note_title:
+            note_title = f"CLI Drop - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+        is_text = False
+        text_content = ""
+        try:
+            text_content = raw_body.decode("utf-8")
+            is_text = True
+        except UnicodeDecodeError:
+            is_text = False
+
+        if is_text and ("text" in content_type or not content_type or not x_filename):
+            note_text = sanitize_html(text_content)
+        else:
+            att_id = uuid.uuid4().hex
+            orig_filename = x_filename or f"drop_{now}.bin"
+            safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', os.path.basename(orig_filename))
+            stored_name = f"{att_id}_{safe_name}"
+            file_path = os.path.join(FILES_DIR, stored_name)
+            with open(file_path, "wb") as f:
+                f.write(raw_body)
+            guessed_type, _ = mimetypes.guess_type(orig_filename)
+            content_type_val = guessed_type or content_type or "application/octet-stream"
+            att = {
+                "id": att_id,
+                "filename": orig_filename,
+                "stored_name": stored_name,
+                "size": len(raw_body),
+                "content_type": content_type_val,
+                "created_at": now
+            }
+            attachments.append(att)
+            if not note_text:
+                note_text = f"Piped binary drop ({format_bytes_py(len(raw_body))})"
+
+    note_id = uuid.uuid4().hex
+    new_note = {
+        "id": note_id,
+        "title": note_title,
+        "text": note_text,
+        "color": color,
+        "pinned": False,
+        "archived": False,
+        "trashed": False,
+        "deleted_at": None,
+        "expires_at": 0,
+        "is_vault": False,
+        "checklist": [],
+        "tags": tags,
+        "attachments": attachments,
+        "sort_order": 0,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    async with notes_lock:
+        notes = read_notes_sync()
+        notes.insert(0, new_note)
+        _atomic_write(NOTES_FILE, notes)
+
+    return {
+        "status": "ok",
+        "id": note_id,
+        "title": note_title,
+        "attachments_count": len(attachments),
+        "url": f"/#note-{note_id}"
+    }
+
+
+# ---------------------------------------------------------------------------
+# API: SSRF-Safe Link Metadata Previews
+# ---------------------------------------------------------------------------
+
+@app.get("/api/link-preview")
+async def get_link_preview(url: str = Query(...)):
+    """Fetch Open Graph title, description, and favicon with SSRF protection against private/loopback IPs."""
+    url = url.strip()
+    if url in link_preview_cache:
+        return link_preview_cache[url]
+
+    parsed = check_url_ssrf_safety(url)
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; KeepBoard/3.0; +https://keepboard)"}
+    )
+
+    try:
+        loop = asyncio.get_event_loop()
+        def fetch():
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                content_type = resp.headers.get_content_type()
+                if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
+                    return None, None
+                chunk = resp.read(65536)  # Read at most 64KB for metadata
+                charset = resp.headers.get_content_charset() or "utf-8"
+                return chunk.decode(charset, errors="ignore"), resp.geturl()
+
+        html_text, final_url = await loop.run_in_executor(None, fetch)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not fetch URL preview: {str(e)}")
+
+    if not html_text:
+        preview = {
+            "url": url,
+            "title": parsed.hostname,
+            "description": "",
+            "image": None,
+            "favicon": f"{parsed.scheme}://{parsed.netloc}/favicon.ico",
+            "domain": parsed.netloc
+        }
+        link_preview_cache[url] = preview
+        return preview
+
+    scraper = HTMLMetaScraper()
+    try:
+        scraper.feed(html_text)
+    except Exception:
+        pass
+
+    resolved_title = scraper.og_title or scraper.meta_title or scraper.title or parsed.hostname
+    resolved_desc = scraper.og_desc or scraper.meta_desc or ""
+
+    base = final_url or url
+    resolved_image = urllib.parse.urljoin(base, scraper.og_image) if scraper.og_image else None
+    resolved_favicon = urllib.parse.urljoin(base, scraper.favicon) if scraper.favicon else f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
+
+    preview = {
+        "url": url,
+        "title": resolved_title,
+        "description": resolved_desc[:240],
+        "image": resolved_image,
+        "favicon": resolved_favicon,
+        "domain": parsed.netloc
+    }
+
+    if len(link_preview_cache) > MAX_LINK_CACHE:
+        link_preview_cache.clear()
+    link_preview_cache[url] = preview
+    return preview
 
 
 # ---------------------------------------------------------------------------

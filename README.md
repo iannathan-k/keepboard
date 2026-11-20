@@ -6,40 +6,45 @@ Zero social-media clutter. Zero account registration friction. Instant cold boot
 
 ---
 
-## What's New in KeepBoard v2
+## What's New in KeepBoard v3
 
-- **Google Keep Layout & Collapsible Left Navigation**:
-  - Left navigation sidebar featuring **Notes**, **Archive**, **Trash**, **Vault**, and dynamic **Labels/Tags**.
-  - Collapses smoothly to an icon rail or expands to full pill navigation on desktop; responsive mobile drawer.
-  - Centered pill search bar across the top viewport with instant filtering and `/` shortcut.
-  - Real-time RAM & tmpfs metrics pill (`14.2 MB / 1 GB RAM`).
-- **Cohesive Modern Dark UI & 8-Color Palette**:
-  - `#131314` canvas, `#1b1c1f` elevated cards, `#24262a` hover surfaces, and 12px rounded corners with soft borders (`rgba(255, 255, 255, 0.08)`).
-  - 8-color dark-mode palette with harmonizing border tints: Default Dark, Coral, Amber, Sand, Olive, Teal, Slate, Purple.
-- **Multi-Select & Floating Batch Action Bar**:
-  - Selection checkmark circles on top-left of cards, `Shift+Click` range selection, and `Cmd/Ctrl+A` select all visible.
-  - Contextual floating batch bar: Batch Pin/Unpin, Batch Color, Batch Tagging, Batch Archive, Batch Merge into one note, Batch Download all attachments as `.zip`, and Batch Trash/Delete.
-- **7-Day Auto-Purging Trash Bin**:
-  - Soft delete: notes move to Trash with `deleted_at` timestamp without unlinking files.
-  - Countdown badges on cards (e.g. `🗑 Purges in 6d`).
-  - Automatic background pruning every hour and on startup for notes in Trash older than 7 days (604,800s).
-  - One-click "Empty Trash Now" button to immediately reclaim tmpfs RAM.
-- **Nested Indentation Support**:
-  - Regular Notes: `Tab` inserts 4 spaces / indents current lines; `Shift+Tab` outdents without losing focus.
-  - Checklists: Indented sub-items (`indent: 0, 1, 2, 3`) with `Tab`/`Shift+Tab` and cascading check/uncheck states.
-- **Inline Media Previews**:
-  - Images (`.png`, `.jpg`, `.webp`, `.gif`, `.svg`), audio (`.mp3`, `.wav`, `.ogg`), and video (`.mp4`, `.webm`) render clean thumbnails and players directly on cards.
-  - Non-media binary files (`.cmir`, `.zip`, `.jar`, `.bin`, `.py`, `.docx`, etc.) render as attachment download pills with no file-type restrictions.
-- **Note Duplication & Card Merging**:
-  - "Make a copy" action creates an instant clone of any note and its checklist/tags.
-  - "Merge Selected" combines multiple notes, checklists, tags, and files into a single consolidated card.
-- **Auto-Expiring Ephemeral Notes ("Burn After...")**:
-  - Set TTL (1 hour, 24 hours, 7 days) on sensitive scratchpads or file drops with countdown badges; automatically purged from RAM when expired.
-- **Password-Protected Vault**:
-  - Dedicated PBKDF2-SHA256 protected vault for sensitive notes and file drops. Completely excluded from non-vault views and search unless unlocked.
-- **One-Click Backup Export & Restore**:
-  - Export full `.zip` bundle containing `notes.json`, `vault.json`, and all `/data/files/`.
-  - Import `.zip` backup to restore notes and files smoothly.
+- **Rich-Text WYSIWYG Editor (`Aa` Formatting Toolbar)**:
+  - Clean `contenteditable` note editing in top capture bar, modal, and split panes.
+  - Raw / Markdown Source Toggle (`</>`) to view and edit raw Markdown/HTML.
+  - Formatting toolbar (`Aa`): Bold (`⌘B`), Italic (`⌘I`), Underline (`⌘U`), Strikethrough, Headings (H1–H3), Bullet/Numbered lists, and Inline Code.
+  - 5 dark-mode highlighter marker tints: Yellow, Cyan, Pink, Green, and Orange.
+  - Clean paste handler stripping foreign web background colors and styling, backed by server-side HTML sanitization.
+- **Multi-Pane Note Workspace & Document Header Outline**:
+  - Side-by-side editing of 2 or 3 notes simultaneously in split panes (`split-pane` button on cards and modal).
+  - Cross-pane drag-and-drop attachment transfer.
+  - Collapsible Document Outline / Table of Contents rail auto-extracting H1–H3 headings with smooth scrolling.
+- **Cross-Device & File-Transfer Power Features**:
+  - Direct CLI / Terminal Drops (`POST /api/drop`): curl files, logs, or piped text directly into KeepBoard without opening the browser.
+  - `>_ CLI` helper button in top header with copyable `curl` commands for current instance.
+  - Embedded Zero-Dependency Pure-JS QR Code Generator: instant mobile phone scanning for direct file downloads or note links over local Wi-Fi.
+  - ZIP / JAR Archive Peek & Extract (`GET /api/files/{id}/zip-list` & `.../zip-extract`): inspect file lists and sizes inside archives without downloading, and extract single files on demand.
+- **Smarter Card Content & Layout Controls**:
+  - Optional Note Title field rendering as a bold header on cards.
+  - Card Text Clamping (~12 lines) with gradient fade and smooth "Show more / Show less" toggle.
+  - SSRF-safe Rich Bookmark Link Previews (`GET /api/link-preview`): Open Graph metadata, title, description, and favicon.
+- **Organization, Search Filters & Drag-and-Drop Speed**:
+  - Spotlight / Command Palette (`Cmd+K` / `Ctrl+K`) for fast keyboard navigation, commands, and note jumping.
+  - Smart Filter Chips under search bar: `All`, `📎 Has Files`, `☑ Checklists`, `⏱ Expiring`, and 8 color dots alongside tags.
+  - Cross-card attachment transfer via drag-and-drop.
+  - Inline attachment renaming with instant metadata update.
+
+---
+
+## Existing Core Features (v1 & v2)
+
+- **Google Keep Layout & Collapsible Left Navigation**: Notes, Archive, Trash, Vault, and dynamic Labels.
+- **8 Refined Dark-Mode Color Swatches**: Default Dark, Coral, Amber, Sand, Olive, Teal, Slate, Purple with harmonizing border tints.
+- **Multi-Select & Floating Batch Action Bar**: Batch Pin, Color, Tag, Archive, Merge, Download `.zip`, and Trash/Delete.
+- **7-Day Auto-Purging Trash Bin**: Soft-delete with countdown badges (`🗑 Purges in 6d`) and one-click "Empty Trash Now".
+- **Nested Indentation Checklists**: `Tab`/`Shift+Tab` hierarchy with cascading check states.
+- **Inline Media Previews**: Audio, video, and image streaming previews directly on cards.
+- **Password-Protected Vault**: PBKDF2-SHA256 protected confidential scratchpad.
+- **One-Click Backup Export & Restore**: Full `.zip` bundle containing `notes.json`, `vault.json`, and all `/data/files/`.
 
 ---
 
@@ -51,9 +56,9 @@ keepboard/
 ├── docker-compose.yml      # Service with tmpfs mount and proxy-net external network
 ├── requirements.txt        # FastAPI, Uvicorn, Python-Multipart
 ├── app/
-│   ├── main.py             # FastAPI backend with chunked streaming and atomic persistence
+│   ├── main.py             # FastAPI backend with chunked streaming, SSRF protection, and atomic persistence
 │   └── static/
-│       └── index.html      # Modern SPA frontend (HTML5, CSS3, Vanilla JS)
+│       └── index.html      # Modern SPA frontend (HTML5, CSS3, Vanilla JS, Pure QR generator)
 └── README.md
 ```
 
@@ -62,7 +67,7 @@ keepboard/
 ## Deployment with Docker Compose
 
 ### 1. Prerequisites
-Ensure your Docker host has the `proxy-net` network created (common for Nginx Proxy Manager / Traefik setups):
+Ensure your Docker host has the `proxy-net` network created:
 ```bash
 docker network create proxy-net
 ```
@@ -78,35 +83,15 @@ The container starts with:
 - Attached to `proxy-net` without exposing host ports.
 
 ### 3. Nginx Proxy Manager Setup
-In the Nginx Proxy Manager UI:
+In Nginx Proxy Manager:
 1. **Add Proxy Host**:
-   - **Domain Names**: `keepboard.your-domain.lan` (or internal hostname)
-   - **Scheme**: `http`
    - **Forward Hostname / IP**: `keepboard` (resolves via Docker DNS on `proxy-net`)
    - **Forward Port**: `8080`
-   - **Cache Assets**: Off
-   - **Block Common Exploits**: On
    - **Websockets Support**: On
-2. **Advanced Tab (for large file uploads)**:
-   Add the following directive so Nginx does not restrict upload size:
+2. **Advanced Tab**:
    ```nginx
    client_max_body_size 0;
    ```
-
----
-
-## Local Development & Testing
-
-If you wish to test the container standalone with a host port mapped:
-
-```bash
-docker run -d \
-  --name keepboard-test \
-  -p 8080:8080 \
-  --tmpfs /data:size=1G,uid=1000,gid=1000,mode=0755 \
-  $(docker build -q .)
-```
-Then open your browser to `http://localhost:8080`.
 
 ---
 
@@ -117,16 +102,22 @@ Then open your browser to `http://localhost:8080`.
 | `GET` | `/api/health` | Health check endpoint |
 | `GET` | `/api/stats` | Storage and RAM tmpfs utilization metrics |
 | `GET` | `/api/notes?view={notes\|archive\|trash\|vault}` | List notes filtered by view |
-| `POST` | `/api/notes` | Create a note (accepts multipart text, color, files, checklist, tags, TTL) |
-| `PUT` | `/api/notes/{id}` | Update text, color, pin, archive, checklist, or tags |
+| `POST` | `/api/notes` | Create a note (accepts title, rich text, color, files, checklist, tags, TTL) |
+| `PUT` | `/api/notes/{id}` | Update title, text, color, pin, archive, checklist, or tags |
 | `POST` | `/api/notes/{id}/duplicate` | Make a copy of a note |
 | `POST` | `/api/notes/{id}/restore` | Restore note from Trash |
-| `DELETE` | `/api/notes/{id}?forever={false\|true}` | Soft delete to Trash (`forever=false`) or permanent purge (`forever=true`) |
+| `DELETE` | `/api/notes/{id}?forever={false\|true}` | Soft delete to Trash or permanent purge |
 | `DELETE` | `/api/trash` | Empty Trash (permanently deletes all trashed notes and files) |
 | `POST` | `/api/notes/batch` | Perform batch operations: pin, unpin, color, archive, trash, delete_forever, merge |
 | `POST` | `/api/notes/batch/download` | Stream `.zip` bundle of all attachments across selected notes |
 | `POST` | `/api/notes/reorder` | Persist custom drag-to-reorder note sort order |
+| `POST` | `/api/drop` | Direct CLI / Piping file or text drop endpoint |
 | `GET` | `/api/files/{att_id}` | Stream file inline (preview for image/audio/video) or download |
+| `GET` | `/api/files/{att_id}/zip-list` | Peek inside ZIP or JAR archive without downloading |
+| `GET` | `/api/files/{att_id}/zip-extract?path=...` | Extract and download single file from archive |
+| `POST` | `/api/notes/{target_id}/transfer-attachment` | Transfer attachment between notes |
+| `PUT` | `/api/notes/{id}/attachments/{att_id}/rename` | Rename attachment display filename |
+| `GET` | `/api/link-preview?url=...` | SSRF-safe Open Graph link metadata scraper |
 | `GET` | `/api/backup/export` | Stream full `.zip` backup bundle |
 | `POST` | `/api/backup/restore` | Restore notes and files from `.zip` backup |
 | `GET` | `/api/vault/status` | Check if vault password is configured |
