@@ -31,12 +31,17 @@ DATA_DIR = os.getenv("DATA_DIR", "/data")
 FILES_DIR = os.path.join(DATA_DIR, "files")
 NOTES_FILE = os.path.join(DATA_DIR, "notes.json")
 VAULT_FILE = os.path.join(DATA_DIR, "vault.json")
+WORKSPACES_FILE = os.path.join(DATA_DIR, "workspaces.json")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 # Optional persistent storage directory
 PERSIST_DIR = os.getenv("PERSIST_DIR", "/persist")
 PERSIST_FILES_DIR = os.path.join(PERSIST_DIR, "files")
 PERSIST_NOTES_FILE = os.path.join(PERSIST_DIR, "notes.json")
+PERSIST_VAULT_FILE = os.path.join(PERSIST_DIR, "vault.json")
+PERSIST_WORKSPACES_FILE = os.path.join(PERSIST_DIR, "workspaces.json")
+
+DEFAULT_WORKSPACES = [{"id": "default", "name": "Personal"}]
 
 # In-memory vault session tokens (token -> expiry_ms)
 vault_sessions: dict[str, int] = {}
@@ -74,22 +79,116 @@ def is_persist_available() -> bool:
         return False
 
 
+def _atomic_write(path: str, obj: Any):
+    """Atomically write JSON to disk using a unique temporary file and fsync, ensuring 1000:1000 ownership."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+        try:
+            os.chown(parent, 1000, 1000)
+        except Exception:
+            pass
+    tmp = f"{path}.tmp.{uuid.uuid4().hex}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.chown(tmp, 1000, 1000)
+    except Exception:
+        pass
+    os.replace(tmp, path)
+    try:
+        os.chown(path, 1000, 1000)
+    except Exception:
+        pass
+
+
 def init_storage():
-    """Ensure data directories and json state files exist."""
+    """Ensure data directories and json state files exist with proper ownership."""
     os.makedirs(FILES_DIR, exist_ok=True)
+    try:
+        os.chown(FILES_DIR, 1000, 1000)
+    except Exception:
+        pass
     if not os.path.exists(NOTES_FILE):
         _atomic_write(NOTES_FILE, [])
     if not os.path.exists(VAULT_FILE):
         _atomic_write(VAULT_FILE, {})
+    if not os.path.exists(WORKSPACES_FILE):
+        _atomic_write(WORKSPACES_FILE, DEFAULT_WORKSPACES)
     if is_persist_available():
         os.makedirs(PERSIST_FILES_DIR, exist_ok=True)
+        try:
+            os.chown(PERSIST_FILES_DIR, 1000, 1000)
+        except Exception:
+            pass
         if not os.path.exists(PERSIST_NOTES_FILE):
             _atomic_write(PERSIST_NOTES_FILE, [])
+        if not os.path.exists(PERSIST_WORKSPACES_FILE):
+            _atomic_write(PERSIST_WORKSPACES_FILE, DEFAULT_WORKSPACES)
+
+
+def read_workspaces_sync() -> list:
+    """Read workspaces list from disk synchronously, falling back to default/persist."""
+    if not os.path.exists(WORKSPACES_FILE):
+        if is_persist_available() and os.path.exists(PERSIST_WORKSPACES_FILE):
+            try:
+                with open(PERSIST_WORKSPACES_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list) and len(data) > 0:
+                        _atomic_write(WORKSPACES_FILE, data)
+                        return data
+            except Exception:
+                pass
+        return list(DEFAULT_WORKSPACES)
+    try:
+        with open(WORKSPACES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list) and len(data) > 0:
+                return data
+            return list(DEFAULT_WORKSPACES)
+    except Exception:
+        return list(DEFAULT_WORKSPACES)
+
+
+def write_workspaces_sync(workspaces: list):
+    """Write workspaces list to disk and mirror to /persist if available."""
+    _atomic_write(WORKSPACES_FILE, workspaces)
+    if is_persist_available():
+        try:
+            _atomic_write(PERSIST_WORKSPACES_FILE, workspaces)
+        except Exception as e:
+            print(f"Error mirroring workspaces to persist: {e}")
 
 
 def sync_from_persist_on_boot():
-    """Load any notes and files marked 'saved_to_disk' from persistent disk into RAM on startup."""
-    if not is_persist_available() or not os.path.exists(PERSIST_NOTES_FILE):
+    """Load notes, workspaces, and vault metadata from persistent disk on startup."""
+    if not is_persist_available():
+        return
+
+    # 1. Restore workspaces if missing on local tmpfs
+    if os.path.exists(PERSIST_WORKSPACES_FILE) and not os.path.exists(WORKSPACES_FILE):
+        try:
+            with open(PERSIST_WORKSPACES_FILE, "r", encoding="utf-8") as f:
+                ws_data = json.load(f)
+                if isinstance(ws_data, list):
+                    _atomic_write(WORKSPACES_FILE, ws_data)
+        except Exception as e:
+            print(f"Error restoring workspaces from persist: {e}")
+
+    # 2. Restore vault config if missing on local tmpfs
+    if os.path.exists(PERSIST_VAULT_FILE) and not os.path.exists(VAULT_FILE):
+        try:
+            with open(PERSIST_VAULT_FILE, "r", encoding="utf-8") as f:
+                v_data = json.load(f)
+                if isinstance(v_data, dict):
+                    _atomic_write(VAULT_FILE, v_data)
+        except Exception as e:
+            print(f"Error restoring vault from persist: {e}")
+
+    # 3. Restore notes and files
+    if not os.path.exists(PERSIST_NOTES_FILE):
         return
     try:
         with open(PERSIST_NOTES_FILE, "r", encoding="utf-8") as f:
@@ -106,11 +205,15 @@ def sync_from_persist_on_boot():
             if not pid:
                 continue
             p_note["saved_to_disk"] = True
+            if not p_note.get("workspace"):
+                p_note["workspace"] = "default"
             if pid not in current_ids:
                 current_notes.append(p_note)
                 changed = True
             else:
                 current_ids[pid]["saved_to_disk"] = True
+                if not current_ids[pid].get("workspace"):
+                    current_ids[pid]["workspace"] = p_note.get("workspace", "default")
                 changed = True
 
             # Restore physical attachments from /persist/files/ to /data/files/
@@ -121,6 +224,10 @@ def sync_from_persist_on_boot():
                     d_path = os.path.join(FILES_DIR, sname)
                     if os.path.exists(p_path) and not os.path.exists(d_path):
                         shutil.copy2(p_path, d_path)
+                        try:
+                            os.chown(d_path, 1000, 1000)
+                        except Exception:
+                            pass
 
         if changed:
             _atomic_write(NOTES_FILE, current_notes)
@@ -145,6 +252,8 @@ def mirror_note_to_persist(note: dict, remove: bool = False):
         persisted = [n for n in persisted if n.get("id") != nid]
 
         if not remove and note.get("saved_to_disk"):
+            if not note.get("workspace"):
+                note["workspace"] = "default"
             persisted.append(note)
             for att in note.get("attachments", []):
                 sname = att.get("stored_name")
@@ -153,38 +262,44 @@ def mirror_note_to_persist(note: dict, remove: bool = False):
                     p_path = os.path.join(PERSIST_FILES_DIR, sname)
                     if os.path.exists(d_path) and not os.path.exists(p_path):
                         shutil.copy2(d_path, p_path)
+                        try:
+                            os.chown(p_path, 1000, 1000)
+                        except Exception:
+                            pass
 
         _atomic_write(PERSIST_NOTES_FILE, persisted)
     except Exception as e:
         print(f"Error mirroring to persist: {e}")
 
 
-def _atomic_write(path: str, obj: Any):
-    """Atomically write JSON to disk using a unique temporary file and fsync."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp.{uuid.uuid4().hex}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
 def read_notes_sync() -> list:
-    """Read all notes synchronously from disk."""
+    """Read all notes synchronously from disk, ensuring each has a workspace field."""
     if not os.path.exists(NOTES_FILE):
         return []
     try:
         with open(NOTES_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            return data if isinstance(data, list) else []
+            notes_list = data if isinstance(data, list) else []
+            for n in notes_list:
+                if not n.get("workspace"):
+                    n["workspace"] = "default"
+            return notes_list
     except Exception:
         return []
 
 
 def read_vault_meta() -> dict:
-    """Read vault metadata synchronously from disk."""
+    """Read vault metadata synchronously from disk, with fallback to persist."""
     if not os.path.exists(VAULT_FILE):
+        if is_persist_available() and os.path.exists(PERSIST_VAULT_FILE):
+            try:
+                with open(PERSIST_VAULT_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        _atomic_write(VAULT_FILE, data)
+                        return data
+            except Exception:
+                pass
         return {}
     try:
         with open(VAULT_FILE, "r", encoding="utf-8") as f:
@@ -537,11 +652,30 @@ class NoteUpdateRequest(BaseModel):
     checklist: Optional[list] = None
     tags: Optional[list] = None
     sort_order: Optional[int] = None
+    workspace: Optional[str] = None
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str
+    id: Optional[str] = None
+
+
+class WorkspaceUpdateRequest(BaseModel):
+    name: str
+
+
+class MoveWorkspaceRequest(BaseModel):
+    workspace: str
+
+
+class BatchMoveWorkspaceRequest(BaseModel):
+    note_ids: List[str]
+    workspace: str
 
 
 class BatchActionRequest(BaseModel):
     ids: List[str]
-    action: str  # "pin", "unpin", "color", "archive", "unarchive", "trash", "restore", "delete_forever", "add_tag", "remove_tag", "merge", "toggle_persist"
+    action: str  # "pin", "unpin", "color", "archive", "unarchive", "trash", "restore", "delete_forever", "add_tag", "remove_tag", "merge", "toggle_persist", "move_workspace"
     payload: Optional[Any] = None
 
 
@@ -554,11 +688,14 @@ class ReorderRequest(BaseModel):
 
 
 class VaultSetPasswordRequest(BaseModel):
-    password: str
+    password: Optional[str] = None
+    new_password: Optional[str] = None
+    master_password: Optional[str] = None
 
 
 class VaultUnlockRequest(BaseModel):
-    password: str
+    password: Optional[str] = None
+    master_password: Optional[str] = None
 
 
 class TransferAttachmentRequest(BaseModel):
@@ -718,6 +855,7 @@ async def create_note(
     tags: str = Form("[]"),
     checklist: str = Form("[]"),
     is_checklist: Optional[bool] = Form(None),
+    workspace: str = Form("default"),
     files: List[UploadFile] = File(default=[]),
     x_vault_token: Optional[str] = Header(default=None)
 ):
@@ -800,6 +938,7 @@ async def create_note(
         "is_checklist": is_check_bool,
         "tags": parsed_tags,
         "attachments": attachments,
+        "workspace": (workspace if isinstance(workspace, str) else getattr(workspace, "default", "default")).strip() or "default",
         "sort_order": 0,
         "created_at": now,
         "updated_at": now,
@@ -812,7 +951,7 @@ async def create_note(
         if saved_disk_bool:
             mirror_note_to_persist(new_note)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "created", "id": note_id}))
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "created", "id": note_id, "workspace": new_note["workspace"]}))
     return new_note
 
 
@@ -837,6 +976,7 @@ async def duplicate_note(
         copy_note["title"] = source.get("title", "")
         copy_note["created_at"] = now
         copy_note["updated_at"] = now
+        copy_note["workspace"] = source.get("workspace", "default")
         copy_note["checklist"] = [dict(it) for it in source.get("checklist", [])]
         copy_note["tags"] = list(source.get("tags", []))
         copy_note["attachments"] = [dict(att) for att in source.get("attachments", [])]
@@ -855,6 +995,7 @@ async def duplicate_note(
 # ---------------------------------------------------------------------------
 
 @app.put("/api/notes/{note_id}")
+@app.patch("/api/notes/{note_id}")
 async def update_note(
     note_id: str,
     payload: NoteUpdateRequest,
@@ -920,12 +1061,14 @@ async def update_note(
             target["tags"] = payload.tags
         if payload.sort_order is not None:
             target["sort_order"] = payload.sort_order
+        if payload.workspace is not None:
+            target["workspace"] = payload.workspace.strip() or "default"
 
         target["updated_at"] = now
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target, remove=not target.get("saved_to_disk"))
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "updated", "id": note_id}))
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "updated", "id": note_id, "workspace": target.get("workspace", "default")}))
     return target
 
 
@@ -1181,6 +1324,17 @@ async def batch_action(
                 n["saved_to_disk"] = val
                 n["updated_at"] = now
                 mirror_note_to_persist(n, remove=not val)
+        elif req.action == "move_workspace":
+            target_ws = ""
+            if isinstance(req.payload, dict):
+                target_ws = req.payload.get("workspace", "").strip()
+            elif isinstance(req.payload, str):
+                target_ws = req.payload.strip()
+            if target_ws:
+                for n in matching:
+                    n["workspace"] = target_ws
+                    n["updated_at"] = now
+                    mirror_note_to_persist(n)
         elif req.action in ("tag", "add_tag"):
             if isinstance(req.payload, dict):
                 tag_to_add = req.payload.get("tag", "").strip()
@@ -1855,14 +2009,16 @@ async def get_link_preview(url: str = Query(...)):
 
 @app.get("/api/backup/export")
 async def export_backup():
-    """Create and stream a full zip backup containing notes.json, vault.json, and all files."""
+    """Create and stream a full zip backup containing notes.json, vault.json, workspaces.json, and all files."""
     async with notes_lock:
         notes_data = read_notes_sync()
         vault_data = read_vault_meta()
+        workspaces_data = read_workspaces_sync()
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("notes.json", json.dumps(notes_data, indent=2, ensure_ascii=False))
+        zf.writestr("workspaces.json", json.dumps(workspaces_data, indent=2, ensure_ascii=False))
         if vault_data:
             zf.writestr("vault.json", json.dumps(vault_data, indent=2, ensure_ascii=False))
 
@@ -1909,6 +2065,15 @@ async def restore_backup(file: UploadFile = File(...)):
                     with open(VAULT_FILE, "wb") as dst:
                         dst.write(vault_bytes)
 
+                elif member == "workspaces.json":
+                    try:
+                        ws_bytes = zf.read(member).decode("utf-8")
+                        ws_imported = json.loads(ws_bytes)
+                        if isinstance(ws_imported, list) and len(ws_imported) > 0:
+                            write_workspaces_sync(ws_imported)
+                    except Exception:
+                        pass
+
             if "notes.json" in zf.namelist():
                 raw = zf.read("notes.json").decode("utf-8")
                 imported = json.loads(raw)
@@ -1925,6 +2090,122 @@ async def restore_backup(file: UploadFile = File(...)):
 
 
 # ---------------------------------------------------------------------------
+# API: Workspaces
+# ---------------------------------------------------------------------------
+
+@app.get("/api/workspaces")
+async def get_workspaces():
+    return read_workspaces_sync()
+
+
+@app.post("/api/workspaces")
+async def create_workspace(payload: WorkspaceCreateRequest):
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Workspace name is required.")
+    ws_id = payload.id.strip() if payload.id else ""
+    if not ws_id:
+        ws_id = re.sub(r'[^a-zA-Z0-9_-]', '', name.lower().replace(' ', '-'))[:24]
+    if not ws_id:
+        ws_id = f"ws_{uuid.uuid4().hex[:8]}"
+
+    workspaces = read_workspaces_sync()
+    if any(w["id"] == ws_id for w in workspaces):
+        ws_id = f"{ws_id}_{uuid.uuid4().hex[:4]}"
+
+    new_ws = {"id": ws_id, "name": name}
+    workspaces.append(new_ws)
+    write_workspaces_sync(workspaces)
+    asyncio.create_task(broadcast_event("workspaces_updated", {"action": "created", "workspace": new_ws}))
+    return new_ws
+
+
+@app.put("/api/workspaces/{workspace_id}")
+@app.patch("/api/workspaces/{workspace_id}")
+async def rename_workspace(workspace_id: str, payload: WorkspaceUpdateRequest):
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Workspace name is required.")
+    workspaces = read_workspaces_sync()
+    target = next((w for w in workspaces if w["id"] == workspace_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found.")
+    target["name"] = name
+    write_workspaces_sync(workspaces)
+    asyncio.create_task(broadcast_event("workspaces_updated", {"action": "renamed", "workspace": target}))
+    return target
+
+
+@app.delete("/api/workspaces/{workspace_id}")
+async def delete_workspace(workspace_id: str):
+    if workspace_id == "default":
+        raise HTTPException(status_code=400, detail="Cannot delete default workspace.")
+    workspaces = read_workspaces_sync()
+    target = next((w for w in workspaces if w["id"] == workspace_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Workspace not found.")
+    workspaces = [w for w in workspaces if w["id"] != workspace_id]
+    write_workspaces_sync(workspaces)
+
+    # Move notes in deleted workspace to default
+    moved_any = False
+    async with notes_lock:
+        notes = read_notes_sync()
+        for n in notes:
+            if n.get("workspace") == workspace_id:
+                n["workspace"] = "default"
+                moved_any = True
+                if n.get("saved_to_disk"):
+                    mirror_note_to_persist(n)
+        if moved_any:
+            _atomic_write(NOTES_FILE, notes)
+
+    asyncio.create_task(broadcast_event("workspaces_updated", {"action": "deleted", "id": workspace_id}))
+    if moved_any:
+        asyncio.create_task(broadcast_event("notes_updated", {"action": "workspace_deleted_reassigned"}))
+    return {"status": "deleted", "id": workspace_id}
+
+
+@app.post("/api/notes/{note_id}/move-workspace")
+async def move_note_workspace(note_id: str, payload: MoveWorkspaceRequest):
+    target_ws = (payload.workspace or "").strip()
+    if not target_ws:
+        raise HTTPException(status_code=400, detail="Target workspace required.")
+    async with notes_lock:
+        notes = read_notes_sync()
+        target = next((n for n in notes if n["id"] == note_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Note not found.")
+        target["workspace"] = target_ws
+        _atomic_write(NOTES_FILE, notes)
+        if target.get("saved_to_disk"):
+            mirror_note_to_persist(target)
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "moved_workspace", "id": note_id, "workspace": target_ws}))
+    return {"status": "ok", "id": note_id, "workspace": target_ws}
+
+
+@app.post("/api/notes/batch/move-workspace")
+async def batch_move_workspace(payload: BatchMoveWorkspaceRequest):
+    target_ws = (payload.workspace or "").strip()
+    if not target_ws:
+        raise HTTPException(status_code=400, detail="Target workspace required.")
+    ids_set = set(payload.note_ids)
+    async with notes_lock:
+        notes = read_notes_sync()
+        count = 0
+        for n in notes:
+            if n["id"] in ids_set:
+                n["workspace"] = target_ws
+                count += 1
+                if n.get("saved_to_disk"):
+                    mirror_note_to_persist(n)
+        if count > 0:
+            _atomic_write(NOTES_FILE, notes)
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "batch_moved_workspace", "workspace": target_ws, "count": count}))
+    return {"status": "ok", "count": count, "workspace": target_ws}
+
+
+# ---------------------------------------------------------------------------
 # API: Password-Protected Vault
 # ---------------------------------------------------------------------------
 
@@ -1935,37 +2216,48 @@ async def vault_status():
 
 
 @app.post("/api/vault/setup")
-async def vault_setup(payload: VaultSetPasswordRequest):
+@app.post("/api/vault/set-password")
+async def vault_setup(payload: dict):
     meta = read_vault_meta()
     if meta.get("password_hash"):
         raise HTTPException(status_code=409, detail="Vault password already configured.")
-    if not payload.password or len(payload.password) < 4:
+    pw = payload.get("password") or payload.get("new_password") or payload.get("master_password") or ""
+    if len(pw) < 4:
         raise HTTPException(status_code=400, detail="Password must be at least 4 characters.")
+    os.makedirs(os.path.dirname(VAULT_FILE), exist_ok=True)
     salt = secrets.token_hex(16)
-    pw_hash = _hash_password(payload.password, salt)
-    _atomic_write(VAULT_FILE, {"password_hash": pw_hash, "salt": salt})
-    return {"status": "configured"}
+    pw_hash = _hash_password(pw, salt)
+    vault_config = {"password_hash": pw_hash, "salt": salt}
+    _atomic_write(VAULT_FILE, vault_config)
+    if is_persist_available():
+        try:
+            _atomic_write(PERSIST_VAULT_FILE, vault_config)
+        except Exception:
+            pass
+    return {"status": "configured", "ok": True}
 
 
 @app.post("/api/vault/unlock")
-async def vault_unlock(payload: VaultUnlockRequest):
+@app.post("/api/vault/verify")
+async def vault_unlock(payload: dict):
     meta = read_vault_meta()
     if not meta.get("password_hash"):
         raise HTTPException(status_code=404, detail="Vault not configured.")
+    pw = payload.get("password") or payload.get("master_password") or ""
     salt = meta.get("salt", "")
-    candidate = _hash_password(payload.password, salt)
+    candidate = _hash_password(pw, salt)
     if not secrets.compare_digest(candidate, meta["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect vault password.")
     token = _new_vault_token()
     vault_sessions[token] = int(time.time() * 1000) + VAULT_SESSION_TTL_MS
-    return {"token": token}
+    return {"token": token, "status": "unlocked", "ok": True}
 
 
 @app.post("/api/vault/lock")
 async def vault_lock(x_vault_token: Optional[str] = Header(default=None)):
     if x_vault_token:
         vault_sessions.pop(x_vault_token, None)
-    return {"status": "locked"}
+    return {"status": "locked", "ok": True}
 
 
 @app.post("/api/vault/change")
@@ -1975,13 +2267,19 @@ async def vault_change(
 ):
     if not _validate_vault_token(x_vault_token):
         raise HTTPException(status_code=403, detail="Vault authentication required.")
-    new_password = payload.get("new_password", "")
-    if not new_password or len(new_password) < 4:
+    new_password = payload.get("new_password") or payload.get("password") or ""
+    if len(new_password) < 4:
         raise HTTPException(status_code=400, detail="Password must be at least 4 characters.")
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(new_password, salt)
-    _atomic_write(VAULT_FILE, {"password_hash": pw_hash, "salt": salt})
-    return {"status": "changed"}
+    vault_config = {"password_hash": pw_hash, "salt": salt}
+    _atomic_write(VAULT_FILE, vault_config)
+    if is_persist_available():
+        try:
+            _atomic_write(PERSIST_VAULT_FILE, vault_config)
+        except Exception:
+            pass
+    return {"status": "changed", "ok": True}
 
 
 # ---------------------------------------------------------------------------

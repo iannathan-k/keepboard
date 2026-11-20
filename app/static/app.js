@@ -6,6 +6,7 @@ import {
   formatDoc,
   formatHighlight,
   formatInlineCode,
+  applyTextStyle,
   setupCleanPaste,
   setupInlineMath,
   extractDocumentOutline,
@@ -38,6 +39,8 @@ const PALETTES = {
 
 // ── Application State ──────────────────────────────────────────────────────
 let allNotes = [];
+let allWorkspaces = [{ id: "default", name: "Personal" }];
+let currentWorkspaceId = localStorage.getItem("keepboard_active_workspace") || "default";
 let currentNavView = "notes"; // "notes" | "archive" | "trash" | "vault"
 let selectedNoteIds = new Set();
 let activeSearchFlairs = new Set(); // e.g. "has:files", "is:checklist", "color:coral", "#work"
@@ -49,7 +52,7 @@ let vaultConfigured = false;
 let vaultUnlocked = Boolean(vaultToken);
 
 let currentEditingNoteId = null;
-let splitPaneNoteIds = [];
+let openPanes = []; // Up to 4 notes open simultaneously side-by-side
 let activeVoiceRecorder = null;
 let currentTagCallback = null;
 let archivePeekFiles = [];
@@ -100,12 +103,20 @@ const batchPinBtn = document.getElementById("batch-pin-btn");
 const batchColorBtn = document.getElementById("batch-color-btn");
 const batchColorPopover = document.getElementById("batch-color-popover");
 const batchTagBtn = document.getElementById("batch-tag-btn");
+const batchWorkspaceBtn = document.getElementById("batch-workspace-btn");
+const batchWorkspacePopover = document.getElementById("batch-workspace-popover");
 const batchArchiveBtn = document.getElementById("batch-archive-btn");
 const batchMergeBtn = document.getElementById("batch-merge-btn");
 const batchDownloadBtn = document.getElementById("batch-download-btn");
 const batchTrashBtn = document.getElementById("batch-trash-btn");
 
 const sidebar = document.getElementById("sidebar");
+const workspacePillBtn = document.getElementById("workspace-pill-btn");
+const workspaceCurrentLabel = document.getElementById("workspace-current-label");
+const workspaceDropdown = document.getElementById("workspace-dropdown");
+const workspaceItemsList = document.getElementById("workspace-items-list");
+const workspaceCreateBtn = document.getElementById("workspace-create-btn");
+
 const navNotes = document.getElementById("nav-notes");
 const navArchive = document.getElementById("nav-archive");
 const navTrash = document.getElementById("nav-trash");
@@ -201,6 +212,7 @@ const modalCloseBtn = document.getElementById("modal-close-btn");
 const splitWorkspaceModal = document.getElementById("split-workspace-modal");
 const splitPanesContainer = document.getElementById("split-panes-container");
 const splitCloseBtn = document.getElementById("split-close-btn");
+const splitCountBadge = document.getElementById("split-count-badge");
 
 const cmdPaletteBackdrop = document.getElementById("cmd-palette-backdrop");
 const cmdPaletteInput = document.getElementById("cmd-palette-input");
@@ -346,6 +358,9 @@ function initLiveSync() {
         try {
           const data = JSON.parse(e.data);
           if (data && data.event && data.event !== "ping") {
+            if (data.event === "workspaces_updated") {
+              loadWorkspaces();
+            }
             loadNotes(false);
             updateStats();
           }
@@ -528,7 +543,12 @@ function setupSearchFlairs() {
 
 // ── Filtered Notes Calculation ─────────────────────────────────────────────
 function getFilteredNotes() {
+  const activeWs = currentWorkspaceId || "default";
   return allNotes.filter((note) => {
+    // 0. Active Workspace Filtering
+    const noteWs = note.workspace || "default";
+    if (noteWs !== activeWs) return false;
+
     // 1. Navigation View Filtering
     if (currentNavView === "trash") {
       if (!note.is_trash) return false;
@@ -580,18 +600,19 @@ function getFilteredNotes() {
 }
 
 // ── Masonry Layout Engine ──────────────────────────────────────────────────
-function computeColumnCount(gridEl) {
+function computeColumnCount(gridEl, count = 1) {
   if (gridDensity === "list") return 1;
-  const containerWidth = gridEl.getBoundingClientRect().width || gridEl.parentElement.clientWidth || 900;
-  const colWidth = gridDensity === "compact" ? 235 : 280;
-  return Math.max(1, Math.floor(containerWidth / colWidth));
+  const containerWidth = gridEl.getBoundingClientRect().width || gridEl.parentElement?.clientWidth || 1000;
+  const colWidth = gridDensity === "compact" ? 210 : 250;
+  const maxCols = Math.max(1, Math.floor(containerWidth / colWidth));
+  return Math.min(Math.max(1, count), maxCols);
 }
 
 function layoutMasonry(gridEl, notesList) {
   gridEl.innerHTML = "";
   if (notesList.length === 0) return;
 
-  const colCount = computeColumnCount(gridEl);
+  const colCount = computeColumnCount(gridEl, notesList.length);
   const cols = [];
   for (let i = 0; i < colCount; i++) {
     const colDiv = document.createElement("div");
@@ -1124,18 +1145,40 @@ function createCardElement(note) {
   };
   actionsBar.appendChild(qrBtn);
 
-  // 7. Archive / Unarchive
+  // 7. Split Workspace Toggle
+  const splitBtn = document.createElement("button");
+  splitBtn.className = "btn-icon";
+  splitBtn.title = "Open in Split Workspace (or ⌘/Ctrl+Click)";
+  splitBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 16H5V5h6v14zm8 0h-6V5h6v14z"/></svg>`;
+  splitBtn.onclick = (e) => {
+    e.stopPropagation();
+    toggleSplitPane(note.id);
+  };
+  actionsBar.appendChild(splitBtn);
+
+  // 8. Move to Workspace
+  const wsBtn = document.createElement("button");
+  wsBtn.className = "btn-icon";
+  wsBtn.title = "Move to workspace";
+  wsBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>`;
+  wsBtn.onclick = (e) => {
+    e.stopPropagation();
+    showMoveWorkspacePopover(note.id, wsBtn);
+  };
+  actionsBar.appendChild(wsBtn);
+
+  // 9. Archive / Unarchive
   const archBtn = document.createElement("button");
   archBtn.className = "btn-icon";
   archBtn.title = note.is_archived ? "Unarchive" : "Archive";
-  archBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM6.24 5h11.52l.83 1H5.42l.82-1zM5 19V8h14v11H5zm3-5h2v3h4v-3h2l-4-4-4 4z"/></svg>`;
+  archBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM6.24 5h11.52l.83 1H5.42l.82-1zM5 19V8h14v11H5zm7-2l5-5h-3.5V9h-3v3H7l5 5z"/></svg>`;
   archBtn.onclick = (e) => {
     e.stopPropagation();
     toggleNoteArchive(note.id, !note.is_archived);
   };
   actionsBar.appendChild(archBtn);
 
-  // 8. Trash / Delete
+  // 10. Trash / Delete
   const trashBtn = document.createElement("button");
   trashBtn.className = "btn-icon";
   if (note.is_trash) {
@@ -1157,10 +1200,15 @@ function createCardElement(note) {
 
   card.appendChild(actionsBar);
 
-  // Open note edit modal on card click
+  // Open note edit modal on card click (or toggle in split workspace if meta/ctrl clicked)
   card.onclick = (e) => {
     // If user clicked inside an interactive button/link/checkbox, don't open modal
-    if (e.target.closest("button, a, input, .card-select-btn, .color-popover, .card-actions, .card-top-tools")) {
+    if (e.target.closest("button, a, input, .card-select-btn, .color-popover, .card-actions, .card-top-tools, .workspace-popover")) {
+      return;
+    }
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault();
+      toggleSplitPane(note.id);
       return;
     }
     openEditModal(note.id);
@@ -1392,6 +1440,7 @@ async function saveComposerNote() {
   formData.append("is_pinned", composerIsPinned);
   formData.append("is_vault", currentNavView === "vault");
   formData.append("is_checklist", composerIsChecklist);
+  formData.append("workspace", currentWorkspaceId || "default");
 
   if (composerTTL) {
     formData.append("ttl", composerTTL);
@@ -1548,84 +1597,512 @@ async function closeEditModal() {
   }
 }
 
-// ── Multi-Pane Workspace Modal ─────────────────────────────────────────────
+// ── Multi-Pane Split Workspace (2–4 Notes) ──────────────────────────────────
 function openInSplitWorkspace(noteId) {
-  editModalBackdrop.style.display = "none";
-  if (!splitPaneNoteIds.includes(noteId)) {
-    splitPaneNoteIds.push(noteId);
+  toggleSplitPane(noteId);
+}
+
+function toggleSplitPane(noteId) {
+  if (editModalBackdrop.style.display === "flex") {
+    editModalBackdrop.style.display = "none";
+    currentEditingNoteId = null;
   }
+
+  const existingIdx = openPanes.indexOf(noteId);
+  if (existingIdx !== -1) {
+    const paneEl = splitPanesContainer.querySelector(`[data-note-id="${noteId}"]`);
+    if (paneEl) {
+      paneEl.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+      paneEl.classList.remove("split-pane-highlight");
+      void paneEl.offsetWidth;
+      paneEl.classList.add("split-pane-highlight");
+      setTimeout(() => paneEl.classList.remove("split-pane-highlight"), 1600);
+      const focusTarget = paneEl.querySelector(".split-title-input") || paneEl.querySelector(".split-rich-editor");
+      if (focusTarget) focusTarget.focus();
+    }
+    return;
+  }
+
+  if (openPanes.length >= 4) {
+    showToast("Maximum 4 split panes can be open simultaneously");
+    return;
+  }
+
+  openPanes.push(noteId);
   renderSplitWorkspace();
-  splitWorkspaceModal.style.display = "flex";
+}
+
+function closeSplitPane(noteId) {
+  openPanes = openPanes.filter((id) => id !== noteId);
+  if (openPanes.length === 0) {
+    splitWorkspaceModal.style.display = "none";
+    if (splitCountBadge) splitCountBadge.textContent = "0 active";
+  } else {
+    renderSplitWorkspace();
+  }
+}
+
+function closeAllSplitPanes() {
+  openPanes = [];
+  splitWorkspaceModal.style.display = "none";
+  if (splitCountBadge) splitCountBadge.textContent = "0 active";
 }
 
 function renderSplitWorkspace() {
+  if (openPanes.length === 0) {
+    splitWorkspaceModal.style.display = "none";
+    if (splitCountBadge) splitCountBadge.textContent = "0 active";
+    return;
+  }
+
+  splitWorkspaceModal.style.display = "flex";
+  if (splitCountBadge) {
+    splitCountBadge.textContent = `${openPanes.length}/4 active`;
+  }
+
   splitPanesContainer.innerHTML = "";
-  splitPaneNoteIds.forEach((id, paneIdx) => {
+
+  openPanes.forEach((id) => {
     const note = allNotes.find((n) => n.id === id);
     if (!note) return;
 
     const pane = document.createElement("div");
     pane.className = "split-pane";
+    pane.dataset.noteId = note.id;
     pane.style.backgroundColor = paletteFor(note.color);
 
+    // Header
     const header = document.createElement("div");
     header.className = "split-pane-header";
-    header.innerHTML = `
-      <span style="font-weight:600; font-size:13px; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">
-        ${escapeHtml(note.title || "Untitled")}
-      </span>
-      <button class="btn-icon" title="Close pane">✕</button>
-    `;
-    header.querySelector(".btn-icon").onclick = () => {
-      splitPaneNoteIds.splice(paneIdx, 1);
-      if (splitPaneNoteIds.length === 0) {
-        splitWorkspaceModal.style.display = "none";
-      } else {
-        renderSplitWorkspace();
-      }
+
+    const titleInput = document.createElement("input");
+    titleInput.className = "split-title-input";
+    titleInput.value = note.title || "";
+    titleInput.placeholder = "Untitled";
+
+    const tools = document.createElement("div");
+    tools.className = "split-pane-tools";
+
+    // Pin Button
+    const pinBtn = document.createElement("button");
+    pinBtn.className = `btn-icon ${note.is_pinned ? "active" : ""}`;
+    pinBtn.title = note.is_pinned ? "Unpin" : "Pin";
+    pinBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9V4l1 0c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1l1 0v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>`;
+    pinBtn.onclick = async () => {
+      const newPinned = !note.is_pinned;
+      note.is_pinned = newPinned;
+      note.pinned = newPinned;
+      pinBtn.classList.toggle("active", newPinned);
+      pinBtn.title = newPinned ? "Unpin" : "Pin";
+      await toggleNotePin(note.id, newPinned);
+      renderNotesGrid();
     };
+    tools.appendChild(pinBtn);
+
+    // Color Swatch Button & Popover
+    const colorWrapper = document.createElement("div");
+    colorWrapper.style.position = "relative";
+    colorWrapper.style.display = "inline-flex";
+
+    const colorBtn = document.createElement("button");
+    colorBtn.className = "btn-icon";
+    colorBtn.title = "Change color";
+    colorBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.27 19.59 10.58 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/></svg>`;
+
+    const colorPopover = document.createElement("div");
+    colorPopover.className = "color-popover";
+    renderSwatches(colorPopover, async (c) => {
+      note.color = c;
+      pane.style.backgroundColor = paletteFor(c);
+      await fetch(`/api/notes/${note.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...vaultHeaders() },
+        body: JSON.stringify({ color: c }),
+      });
+      renderNotesGrid();
+    });
+
+    colorBtn.onclick = (e) => {
+      e.stopPropagation();
+      colorPopover.classList.toggle("show");
+    };
+
+    colorWrapper.appendChild(colorBtn);
+    colorWrapper.appendChild(colorPopover);
+    tools.appendChild(colorWrapper);
+
+    // Persist Shield Button
+    const shieldBtn = document.createElement("button");
+    shieldBtn.className = `btn-icon ${note.is_vault ? "active" : ""}`;
+    shieldBtn.title = note.is_vault ? "In Vault (Protected)" : "Move to Vault";
+    shieldBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>`;
+    shieldBtn.onclick = async () => {
+      const newVault = !note.is_vault;
+      note.is_vault = newVault;
+      shieldBtn.classList.toggle("active", newVault);
+      await fetch(`/api/notes/${note.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...vaultHeaders() },
+        body: JSON.stringify({ is_vault: newVault }),
+      });
+      showToast(newVault ? "Protected in Vault" : "Moved out of Vault");
+      renderNotesGrid();
+    };
+    tools.appendChild(shieldBtn);
+
+    // Close × Button
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "btn-icon";
+    closeBtn.title = "Close pane";
+    closeBtn.textContent = "✕";
+    closeBtn.onclick = () => closeSplitPane(note.id);
+    tools.appendChild(closeBtn);
+
+    header.appendChild(titleInput);
+    header.appendChild(tools);
     pane.appendChild(header);
 
+    // Body
     const body = document.createElement("div");
     body.className = "split-pane-body";
 
-    const titleInput = document.createElement("input");
-    titleInput.className = "composer-title-input";
-    titleInput.value = note.title || "";
-    titleInput.placeholder = "Title";
+    let editor = null;
+    let checklistItems = Array.isArray(note.checklist) ? [...note.checklist] : [];
 
-    const editor = document.createElement("div");
-    editor.className = "note-rich-editor";
-    editor.contentEditable = "true";
-    editor.innerHTML = note.content || "";
-    setupCleanPaste(editor);
-    setupInlineMath(editor);
-
-    body.appendChild(titleInput);
-    body.appendChild(editor);
-    pane.appendChild(body);
-
-    // Auto-save debounce on pane input
     let saveTimeout = null;
-    const triggerSave = () => {
+    const debouncedSave = () => {
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(async () => {
+        const titleVal = titleInput.value.trim();
+        const contentVal = note.is_checklist ? "" : (editor ? editor.innerHTML.trim() : "");
+        note.title = titleVal;
+        if (!note.is_checklist) {
+          note.content = contentVal;
+          note.text = contentVal;
+        } else {
+          note.checklist = checklistItems;
+        }
+
+        const payload = {
+          title: titleVal,
+          content: contentVal,
+          text: contentVal,
+        };
+        if (note.is_checklist) {
+          payload.checklist = checklistItems;
+          payload.is_checklist = true;
+        }
+
         await fetch(`/api/notes/${note.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json", ...vaultHeaders() },
-          body: JSON.stringify({
-            title: titleInput.value.trim(),
-            content: editor.innerHTML.trim(),
-          }),
+          body: JSON.stringify(payload),
         });
-      }, 800);
+
+        const cardEl = document.querySelector(`.note-card[data-id="${note.id}"]`);
+        if (cardEl) {
+          const cardTitle = cardEl.querySelector(".card-title");
+          if (cardTitle) cardTitle.textContent = titleVal || "";
+          const cardContent = cardEl.querySelector(".card-content");
+          if (cardContent && !note.is_checklist) cardContent.innerHTML = contentVal || "";
+        }
+      }, 600);
     };
 
-    titleInput.addEventListener("input", triggerSave);
-    editor.addEventListener("input", triggerSave);
+    titleInput.addEventListener("input", debouncedSave);
 
+    if (note.is_checklist) {
+      const checkContainer = document.createElement("div");
+      checkContainer.className = "checklist-container";
+
+      const renderChecklist = () => {
+        checkContainer.innerHTML = "";
+        checklistItems.forEach((item, itemIdx) => {
+          const row = document.createElement("div");
+          row.className = "checklist-item-row";
+
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = Boolean(item.checked);
+          cb.onchange = () => {
+            item.checked = cb.checked;
+            itemText.classList.toggle("checked", cb.checked);
+            debouncedSave();
+          };
+
+          const itemText = document.createElement("input");
+          itemText.type = "text";
+          itemText.className = `checklist-item-text ${item.checked ? "checked" : ""}`;
+          itemText.value = item.text || "";
+          itemText.oninput = () => {
+            item.text = itemText.value;
+            debouncedSave();
+          };
+
+          const delItemBtn = document.createElement("button");
+          delItemBtn.className = "btn-icon";
+          delItemBtn.textContent = "✕";
+          delItemBtn.onclick = () => {
+            checklistItems.splice(itemIdx, 1);
+            renderChecklist();
+            debouncedSave();
+          };
+
+          row.appendChild(cb);
+          row.appendChild(itemText);
+          row.appendChild(delItemBtn);
+          checkContainer.appendChild(row);
+        });
+
+        const addRow = document.createElement("div");
+        addRow.className = "checklist-item-row add-row";
+        const addInput = document.createElement("input");
+        addInput.type = "text";
+        addInput.className = "checklist-item-text";
+        addInput.placeholder = "+ Add item";
+        addInput.onkeydown = (e) => {
+          if (e.key === "Enter" && addInput.value.trim()) {
+            checklistItems.push({ text: addInput.value.trim(), checked: false });
+            renderChecklist();
+            debouncedSave();
+          }
+        };
+        addRow.appendChild(addInput);
+        checkContainer.appendChild(addRow);
+      };
+
+      renderChecklist();
+      body.appendChild(checkContainer);
+    } else {
+      editor = document.createElement("div");
+      editor.className = "split-rich-editor";
+      editor.contentEditable = "true";
+      editor.innerHTML = note.content || "";
+      setupCleanPaste(editor);
+      setupInlineMath(editor);
+      editor.addEventListener("input", debouncedSave);
+      body.appendChild(editor);
+    }
+
+    if (note.attachments && note.attachments.length > 0) {
+      const attachDiv = document.createElement("div");
+      attachDiv.className = "card-attachments";
+      attachDiv.style.marginTop = "auto";
+      attachDiv.style.paddingTop = "8px";
+      note.attachments.forEach((att) => {
+        const pill = document.createElement("a");
+        pill.className = "attachment-pill";
+        pill.href = `/api/attachments/${att.filename}`;
+        pill.target = "_blank";
+        pill.innerHTML = `📎 <span>${escapeHtml(att.filename)}</span>`;
+        attachDiv.appendChild(pill);
+      });
+      body.appendChild(attachDiv);
+    }
+
+    pane.appendChild(body);
     splitPanesContainer.appendChild(pane);
   });
+}
+
+// ── Workspaces Management ──────────────────────────────────────────────────
+async function loadWorkspaces() {
+  try {
+    const res = await fetch("/api/workspaces");
+    if (res.ok) {
+      const data = await res.json();
+      allWorkspaces = Array.isArray(data) && data.length > 0 ? data : [{ id: "default", name: "Personal" }];
+    }
+  } catch (err) {
+    console.error("Failed to load workspaces:", err);
+  }
+  if (!allWorkspaces.some((w) => w.id === currentWorkspaceId)) {
+    currentWorkspaceId = allWorkspaces[0]?.id || "default";
+    localStorage.setItem("keepboard_active_workspace", currentWorkspaceId);
+  }
+  renderWorkspaceSwitcher();
+}
+
+function renderWorkspaceSwitcher() {
+  const currentWs = allWorkspaces.find((w) => w.id === currentWorkspaceId) || allWorkspaces[0] || { id: "default", name: "Personal" };
+  workspaceCurrentLabel.textContent = currentWs.name;
+
+  workspaceItemsList.innerHTML = "";
+  allWorkspaces.forEach((ws) => {
+    const row = document.createElement("div");
+    row.className = `workspace-item-row ${ws.id === currentWorkspaceId ? "active" : ""}`;
+
+    const titleSpan = document.createElement("span");
+    titleSpan.style.textOverflow = "ellipsis";
+    titleSpan.style.overflow = "hidden";
+    titleSpan.style.whiteSpace = "nowrap";
+    titleSpan.textContent = ws.name;
+    titleSpan.style.flex = "1";
+
+    row.appendChild(titleSpan);
+
+    const actions = document.createElement("div");
+    actions.className = "workspace-item-actions";
+
+    // Rename button
+    const renameBtn = document.createElement("button");
+    renameBtn.className = "workspace-item-btn";
+    renameBtn.title = "Rename workspace";
+    renameBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>`;
+    renameBtn.onclick = async (e) => {
+      e.stopPropagation();
+      const newName = prompt("Rename workspace:", ws.name);
+      if (newName && newName.trim() && newName.trim() !== ws.name) {
+        try {
+          const res = await fetch(`/api/workspaces/${ws.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: newName.trim() }),
+          });
+          if (res.ok) {
+            await loadWorkspaces();
+            await loadNotes(false);
+          }
+        } catch (err) {
+          showToast("Failed to rename workspace");
+        }
+      }
+    };
+    actions.appendChild(renameBtn);
+
+    // Delete button (non-default only)
+    if (ws.id !== "default") {
+      const delBtn = document.createElement("button");
+      delBtn.className = "workspace-item-btn";
+      delBtn.title = "Delete workspace";
+      delBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+      delBtn.onclick = async (e) => {
+        e.stopPropagation();
+        if (confirm(`Delete workspace "${ws.name}"? Notes in this workspace will be moved to Personal.`)) {
+          try {
+            const res = await fetch(`/api/workspaces/${ws.id}`, { method: "DELETE" });
+            if (res.ok) {
+              if (currentWorkspaceId === ws.id) {
+                currentWorkspaceId = "default";
+                localStorage.setItem("keepboard_active_workspace", "default");
+              }
+              await loadWorkspaces();
+              await loadNotes();
+            }
+          } catch (err) {
+            showToast("Failed to delete workspace");
+          }
+        }
+      };
+      actions.appendChild(delBtn);
+    }
+
+    row.appendChild(actions);
+
+    row.onclick = () => {
+      switchWorkspace(ws.id);
+      workspaceDropdown.style.display = "none";
+      workspacePillBtn.classList.remove("open");
+    };
+
+    workspaceItemsList.appendChild(row);
+  });
+}
+
+function switchWorkspace(wsId) {
+  currentWorkspaceId = wsId;
+  localStorage.setItem("keepboard_active_workspace", currentWorkspaceId);
+  renderWorkspaceSwitcher();
+  renderSidebarTags();
+  renderNotesGrid();
+}
+
+function showMoveWorkspacePopover(noteId, anchorEl) {
+  document.querySelectorAll(".card-ws-popover").forEach((el) => el.remove());
+
+  const popover = document.createElement("div");
+  popover.className = "workspace-popover card-ws-popover show";
+  popover.style.display = "flex";
+  popover.style.position = "absolute";
+  popover.style.bottom = "38px";
+  popover.style.left = "0";
+
+  const header = document.createElement("div");
+  header.className = "workspace-dropdown-header";
+  header.textContent = "Move to workspace";
+  popover.appendChild(header);
+
+  const note = allNotes.find((n) => n.id === noteId);
+  const currentWs = note?.workspace || "default";
+
+  allWorkspaces.forEach((ws) => {
+    const item = document.createElement("div");
+    item.className = `workspace-item-row ${ws.id === currentWs ? "active" : ""}`;
+    item.textContent = ws.name;
+    item.onclick = async (e) => {
+      e.stopPropagation();
+      popover.remove();
+      if (ws.id === currentWs) return;
+      try {
+        const res = await fetch(`/api/notes/${noteId}/move-workspace`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...vaultHeaders() },
+          body: JSON.stringify({ workspace: ws.id }),
+        });
+        if (res.ok) {
+          if (note) note.workspace = ws.id;
+          showToast(`Moved note to ${ws.name}`);
+          await loadNotes();
+        } else {
+          showToast("Failed to move note");
+        }
+      } catch (err) {
+        showToast("Error moving note");
+      }
+    };
+    popover.appendChild(item);
+  });
+
+  anchorEl.parentElement.style.position = "relative";
+  anchorEl.parentElement.appendChild(popover);
+}
+
+function showBatchMoveWorkspacePopover() {
+  batchWorkspacePopover.innerHTML = "";
+  const header = document.createElement("div");
+  header.className = "workspace-dropdown-header";
+  header.textContent = "Move selected to";
+  batchWorkspacePopover.appendChild(header);
+
+  allWorkspaces.forEach((ws) => {
+    const item = document.createElement("div");
+    item.className = `workspace-item-row ${ws.id === currentWorkspaceId ? "active" : ""}`;
+    item.textContent = ws.name;
+    item.onclick = async (e) => {
+      e.stopPropagation();
+      batchWorkspacePopover.style.display = "none";
+      const ids = Array.from(selectedNoteIds);
+      if (ids.length === 0) return;
+      try {
+        const res = await fetch("/api/notes/batch/move-workspace", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...vaultHeaders() },
+          body: JSON.stringify({ ids, workspace: ws.id }),
+        });
+        if (res.ok) {
+          showToast(`Moved ${ids.length} note(s) to ${ws.name}`);
+          clearSelection();
+          await loadNotes();
+        } else {
+          showToast("Failed to move notes");
+        }
+      } catch (err) {
+        showToast("Error moving notes");
+      }
+    };
+    batchWorkspacePopover.appendChild(item);
+  });
+  batchWorkspacePopover.style.display = "flex";
 }
 
 // ── Spotlight Command Palette (⌘K) ─────────────────────────────────────────
@@ -1771,6 +2248,7 @@ function renderArchivePeekRows(query) {
 function normalizeNote(n) {
   n.text = n.text || n.content || "";
   n.content = n.text;
+  n.workspace = n.workspace || "default";
   n.pinned = Boolean(n.pinned ?? n.is_pinned);
   n.is_pinned = n.pinned;
   n.archived = Boolean(n.archived ?? n.is_archived);
@@ -1947,7 +2425,10 @@ async function renameAttachment(noteId, attachmentId, newFilename) {
 function renderSidebarTags() {
   sidebarTagsList.innerHTML = "";
   const tagCounts = {};
+  const activeWs = currentWorkspaceId || "default";
   allNotes.forEach((n) => {
+    const noteWs = n.workspace || "default";
+    if (noteWs !== activeWs) return;
     if (!n.is_trash && n.tags && Array.isArray(n.tags)) {
       n.tags.forEach((t) => {
         const clean = t.replace("#", "");
@@ -1986,11 +2467,10 @@ async function checkVaultStatus() {
 }
 
 function updateVaultUI() {
+  vaultNavText.textContent = "Vault";
   if (vaultUnlocked) {
-    vaultNavText.textContent = "Vault (Unlocked)";
     vaultNavIcon.innerHTML = `<path d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h1.9c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10z"/>`;
   } else {
-    vaultNavText.textContent = "Vault (Protected)";
     vaultNavIcon.innerHTML = `<path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>`;
   }
 
@@ -2125,6 +2605,48 @@ function setupEventListeners() {
     openTagPromptModal((tag) => executeBatchAction("tag", tag));
   };
 
+  batchWorkspaceBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (batchWorkspacePopover.style.display === "flex") {
+      batchWorkspacePopover.style.display = "none";
+    } else {
+      showBatchMoveWorkspacePopover();
+    }
+  };
+
+  // Workspace Switcher (Sidebar)
+  workspacePillBtn.onclick = (e) => {
+    e.stopPropagation();
+    const isVisible = workspaceDropdown.style.display === "flex";
+    workspaceDropdown.style.display = isVisible ? "none" : "flex";
+    workspacePillBtn.classList.toggle("open", !isVisible);
+  };
+
+  workspaceCreateBtn.onclick = async (e) => {
+    e.stopPropagation();
+    const name = prompt("New workspace name:");
+    if (name && name.trim()) {
+      try {
+        const res = await fetch("/api/workspaces", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        if (res.ok) {
+          const newWs = await res.json();
+          await loadWorkspaces();
+          switchWorkspace(newWs.id);
+        } else {
+          showToast("Failed to create workspace");
+        }
+      } catch (err) {
+        showToast("Error creating workspace");
+      }
+    }
+    workspaceDropdown.style.display = "none";
+    workspacePillBtn.classList.remove("open");
+  };
+
   // Composer Expansion & Collapse
   captureCollapsed.onclick = expandComposer;
   composerCloseBtn.onclick = collapseComposer;
@@ -2169,7 +2691,7 @@ function setupEventListeners() {
   document.getElementById("fmt-c-ul").onclick = () => formatDoc("insertUnorderedList");
   document.getElementById("fmt-c-ol").onclick = () => formatDoc("insertOrderedList");
   document.getElementById("fmt-c-code").onclick = () => formatInlineCode();
-  document.getElementById("fmt-c-heading").onchange = (e) => formatDoc("formatBlock", e.target.value);
+  document.getElementById("fmt-c-heading").onchange = (e) => applyTextStyle(e.target.value);
 
   // WYSIWYG Formatting Buttons (Modal)
   document.getElementById("fmt-m-bold").onclick = () => formatDoc("bold");
@@ -2184,7 +2706,7 @@ function setupEventListeners() {
   document.getElementById("fmt-m-ul").onclick = () => formatDoc("insertUnorderedList");
   document.getElementById("fmt-m-ol").onclick = () => formatDoc("insertOrderedList");
   document.getElementById("fmt-m-code").onclick = () => formatInlineCode();
-  document.getElementById("fmt-m-heading").onchange = (e) => formatDoc("formatBlock", e.target.value);
+  document.getElementById("fmt-m-heading").onchange = (e) => applyTextStyle(e.target.value);
 
   // Raw Markdown Toggle (Composer)
   composerRawToggleBtn.onclick = () => {
@@ -2334,7 +2856,7 @@ function setupEventListeners() {
   };
 
   modalSplitBtn.onclick = () => {
-    if (currentEditingNoteId) openInSplitWorkspace(currentEditingNoteId);
+    if (currentEditingNoteId) toggleSplitPane(currentEditingNoteId);
   };
 
   modalQrBtn.onclick = () => {
@@ -2374,9 +2896,8 @@ function setupEventListeners() {
 
   // Split Workspace
   splitCloseBtn.onclick = () => {
-    splitWorkspaceModal.style.display = "none";
-    splitPaneNoteIds = [];
-    loadNotes();
+    closeAllSplitPanes();
+    loadNotes(false);
   };
 
   // CLI Modal Snippets
@@ -2459,6 +2980,7 @@ function setupEventListeners() {
     const formData = new FormData();
     formData.append("title", files.length === 1 ? files[0].name : `Dropped Files (${files.length})`);
     formData.append("color", "default");
+    formData.append("workspace", currentWorkspaceId || "default");
     files.forEach((f) => formData.append("files", f));
 
     try {
@@ -2485,6 +3007,24 @@ function setupEventListeners() {
     },
     showToast,
     vaultHeaders,
+    getWorkspace: () => currentWorkspaceId || "default",
+  });
+
+  // Dismiss Popovers on Outside Click
+  document.addEventListener("click", (e) => {
+    if (workspaceDropdown && !workspaceDropdown.contains(e.target) && !workspacePillBtn.contains(e.target)) {
+      workspaceDropdown.style.display = "none";
+      workspacePillBtn.classList.remove("open");
+    }
+    if (batchWorkspacePopover && !batchWorkspacePopover.contains(e.target) && !batchWorkspaceBtn.contains(e.target)) {
+      batchWorkspacePopover.style.display = "none";
+    }
+    if (batchColorPopover && !batchColorPopover.contains(e.target) && !batchColorBtn.contains(e.target)) {
+      batchColorPopover.classList.remove("show");
+    }
+    if (!e.target.closest(".card-ws-popover") && !e.target.closest("button[title='Move to workspace']")) {
+      document.querySelectorAll(".card-ws-popover").forEach((el) => el.remove());
+    }
   });
 
   // Spotlight Command Palette
@@ -2600,6 +3140,7 @@ async function initApp() {
   applyGridDensity(gridDensity);
   setupEventListeners();
   initLiveSync();
+  await loadWorkspaces();
   await checkVaultStatus();
   await loadNotes();
   await updateStats();

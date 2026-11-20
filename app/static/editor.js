@@ -5,6 +5,22 @@ export function formatDoc(cmd, val = null) {
   document.execCommand(cmd, false, val);
 }
 
+export function applyTextStyle(val) {
+  if (val === "small") {
+    document.execCommand("formatBlock", false, "<p>");
+    document.execCommand("fontSize", false, "2");
+  } else if (val === "large") {
+    document.execCommand("formatBlock", false, "<p>");
+    document.execCommand("fontSize", false, "5");
+  } else if (val === "p" || val === "normal") {
+    document.execCommand("formatBlock", false, "<p>");
+    document.execCommand("fontSize", false, "3");
+  } else if (val === "h1" || val === "h2" || val === "h3") {
+    document.execCommand("fontSize", false, "3");
+    document.execCommand("formatBlock", false, `<${val}>`);
+  }
+}
+
 export function formatHighlight(color) {
   document.execCommand("hiliteColor", false, color);
 }

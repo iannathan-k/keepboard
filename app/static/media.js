@@ -13,7 +13,7 @@ export function formatDateTimeStamp() {
 }
 
 // ── Global Cmd/Ctrl+V Clipboard Capture Anywhere ────────────────────────────
-export function setupGlobalPaste({ onNoteCreated, showToast, vaultHeaders }) {
+export function setupGlobalPaste({ onNoteCreated, showToast, vaultHeaders, getWorkspace }) {
   window.addEventListener("paste", async (e) => {
     const active = document.activeElement;
     const isEditing = active && (
@@ -26,6 +26,8 @@ export function setupGlobalPaste({ onNoteCreated, showToast, vaultHeaders }) {
 
     const clipboardData = e.clipboardData;
     if (!clipboardData) return;
+
+    const currentWs = typeof getWorkspace === "function" ? getWorkspace() : "default";
 
     // 1. Check for files or clipboard screenshot
     if (clipboardData.files && clipboardData.files.length > 0) {
@@ -47,6 +49,7 @@ export function setupGlobalPaste({ onNoteCreated, showToast, vaultHeaders }) {
       fd.append("files", fileToUpload);
       fd.append("title", isImage ? `Screenshot ${timestamp}` : filename);
       fd.append("text", isImage ? "Pasted screenshot from clipboard" : `Pasted file: ${filename}`);
+      fd.append("workspace", currentWs || "default");
 
       try {
         const res = await fetch("/api/notes", {
@@ -76,6 +79,7 @@ export function setupGlobalPaste({ onNoteCreated, showToast, vaultHeaders }) {
       const fd = new FormData();
       fd.append("title", title);
       fd.append("text", trimmed);
+      fd.append("workspace", currentWs || "default");
 
       try {
         const res = await fetch("/api/notes", {
@@ -142,34 +146,66 @@ export class VoiceMemoRecorder {
     this.stream = null;
     this.timerInterval = null;
     this.elapsedSeconds = 0;
+    this._onStopCallback = null;
+    this.selectedMime = "";
   }
 
-  async start({ onTick, onStop, onError }) {
+  async start(optionsOrOnTick) {
+    let onTick, onStop, onError;
+    if (typeof optionsOrOnTick === "function") {
+      onTick = optionsOrOnTick;
+    } else if (optionsOrOnTick && typeof optionsOrOnTick === "object") {
+      onTick = optionsOrOnTick.onTick;
+      onStop = optionsOrOnTick.onStop;
+      onError = optionsOrOnTick.onError;
+    }
+    this._onStopCallback = onStop;
+
+    if (typeof window !== "undefined" && window.isSecureContext === false) {
+      const err = new Error("Microphone access requires HTTPS or localhost. Mic access is blocked on plain HTTP.");
+      if (onError) onError(err);
+      throw err;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const err = new Error("Microphone API (getUserMedia) is not supported or blocked in this browser.");
+      if (onError) onError(err);
+      throw err;
+    }
+
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       this.audioChunks = [];
       this.elapsedSeconds = 0;
 
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : (MediaRecorder.isTypeSupported("audio/ogg") ? "audio/ogg" : "");
+      // Dynamically pick the best supported MIME type (audio/mp4 for Safari/macOS, audio/webm for Chrome, audio/ogg fallback)
+      const candidateTypes = [
+        "audio/mp4",
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/ogg"
+      ];
 
-      this.mediaRecorder = new MediaRecorder(this.stream, mimeType ? { mimeType } : undefined);
+      let pickedMime = "";
+      if (typeof MediaRecorder !== "undefined" && typeof MediaRecorder.isTypeSupported === "function") {
+        for (const type of candidateTypes) {
+          if (MediaRecorder.isTypeSupported(type)) {
+            pickedMime = type;
+            break;
+          }
+        }
+      }
+
+      this.selectedMime = pickedMime;
+      this.mediaRecorder = pickedMime
+        ? new MediaRecorder(this.stream, { mimeType: pickedMime })
+        : new MediaRecorder(this.stream);
 
       this.mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) this.audioChunks.push(e.data);
-      };
-
-      this.mediaRecorder.onstop = () => {
-        clearInterval(this.timerInterval);
-        if (this.stream) {
-          this.stream.getTracks().forEach(t => t.stop());
+        if (e.data && e.data.size > 0) {
+          this.audioChunks.push(e.data);
         }
-        const blob = new Blob(this.audioChunks, { type: this.mediaRecorder.mimeType || "audio/webm" });
-        const ext = (this.mediaRecorder.mimeType || "").includes("ogg") ? "ogg" : "webm";
-        const filename = `voicememo-${formatDateTimeStamp()}.${ext}`;
-        const file = new File([blob], filename, { type: blob.type });
-        onStop(file);
       };
 
       this.mediaRecorder.start(250);
@@ -177,24 +213,71 @@ export class VoiceMemoRecorder {
         this.elapsedSeconds++;
         const mins = Math.floor(this.elapsedSeconds / 60);
         const secs = String(this.elapsedSeconds % 60).padStart(2, "0");
-        onTick(`${mins}:${secs}`);
+        if (onTick) {
+          onTick(this.elapsedSeconds, `${mins}:${secs}`);
+        }
       }, 1000);
 
     } catch (err) {
+      if (this.stream) {
+        this.stream.getTracks().forEach(t => t.stop());
+        this.stream = null;
+      }
       if (onError) onError(err);
+      throw err;
     }
   }
 
   stop() {
-    if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
+    return new Promise((resolve) => {
+      clearInterval(this.timerInterval);
+      if (!this.mediaRecorder || this.mediaRecorder.state === "inactive") {
+        if (this.stream) {
+          this.stream.getTracks().forEach(t => t.stop());
+          this.stream = null;
+        }
+        resolve(null);
+        return;
+      }
+
+      this.mediaRecorder.onstop = () => {
+        if (this.stream) {
+          this.stream.getTracks().forEach(t => t.stop());
+          this.stream = null;
+        }
+
+        const mime = this.mediaRecorder.mimeType || this.selectedMime || "audio/webm";
+        let ext = "webm";
+        if (mime.includes("mp4")) ext = "mp4";
+        else if (mime.includes("ogg")) ext = "ogg";
+        else if (mime.includes("webm")) ext = "webm";
+        else if (mime.includes("wav")) ext = "wav";
+
+        const blob = new Blob(this.audioChunks, { type: mime });
+        const filename = `voicememo-${formatDateTimeStamp()}.${ext}`;
+        const file = new File([blob], filename, { type: mime });
+
+        // Attach convenience properties so consumers expecting Blob or File work seamlessly
+        blob.file = file;
+        blob.ext = ext;
+        blob.filename = filename;
+        blob.mimeType = mime;
+
+        if (this._onStopCallback) {
+          this._onStopCallback(file);
+        }
+        resolve(blob);
+      };
+
       this.mediaRecorder.stop();
-    }
+    });
   }
 
   cancel() {
     clearInterval(this.timerInterval);
     if (this.stream) {
       this.stream.getTracks().forEach(t => t.stop());
+      this.stream = null;
     }
     if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
       this.mediaRecorder.ondataavailable = null;
