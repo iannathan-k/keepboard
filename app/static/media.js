@@ -1,6 +1,17 @@
 // ── KeepBoard v3: media.js ──────────────────────────────────────────────────
 // Global clipboard capture, per-card dropzones, voice recorder, QR generator
 
+// Register global window dragover & drop preventDefault immediately on module load
+// so dropping a file anywhere on the page never navigates away or opens browser previewer.
+if (typeof window !== "undefined") {
+  window.addEventListener("dragover", (e) => {
+    e.preventDefault();
+  }, false);
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+  }, false);
+}
+
 export function formatDateTimeStamp() {
   const now = new Date();
   const Y = now.getFullYear();
@@ -99,41 +110,63 @@ export function setupGlobalPaste({ onNoteCreated, showToast, vaultHeaders, getWo
 
 // ── Per-Card File Dropzone ──────────────────────────────────────────────────
 export function setupCardDropzone(cardEl, noteId, { onAttachmentsUploaded, showToast, vaultHeaders }) {
-  cardEl.addEventListener("dragover", (e) => {
-    if (e.dataTransfer.types.includes("Files")) {
+  cardEl.addEventListener("dragenter", (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
       e.preventDefault();
+      e.stopPropagation();
       cardEl.classList.add("drop-target");
+      const overlay = document.getElementById("drop-overlay");
+      if (overlay) overlay.style.display = "none";
     }
   });
 
-  cardEl.addEventListener("dragleave", () => {
-    cardEl.classList.remove("drop-target");
+  cardEl.addEventListener("dragover", (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "copy";
+      cardEl.classList.add("drop-target");
+      const overlay = document.getElementById("drop-overlay");
+      if (overlay) overlay.style.display = "none";
+    }
+  });
+
+  cardEl.addEventListener("dragleave", (e) => {
+    if (!cardEl.contains(e.relatedTarget)) {
+      cardEl.classList.remove("drop-target");
+    }
   });
 
   cardEl.addEventListener("drop", async (e) => {
-    if (e.dataTransfer.types.includes("Files")) {
-      e.preventDefault();
-      e.stopPropagation();
-      cardEl.classList.remove("drop-target");
+    e.preventDefault();
+    e.stopPropagation();
+    cardEl.classList.remove("drop-target");
+    const overlay = document.getElementById("drop-overlay");
+    if (overlay) overlay.style.display = "none";
 
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length === 0) return;
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length === 0) return;
 
-      const fd = new FormData();
-      files.forEach(f => fd.append("files", f));
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f));
 
-      try {
-        const res = await fetch(`/api/notes/${noteId}/attachments`, {
-          method: "POST",
-          headers: vaultHeaders(),
-          body: fd
-        });
+    try {
+      const res = await fetch(`/api/notes/${noteId}/attachments`, {
+        method: "POST",
+        headers: typeof vaultHeaders === "function" ? vaultHeaders() : {},
+        body: fd,
+      });
+      if (res.ok) {
         const updated = await res.json();
-        onAttachmentsUploaded(updated);
+        if (typeof onAttachmentsUploaded === "function") {
+          onAttachmentsUploaded(updated);
+        }
         showToast(`Added ${files.length} attachment(s) to card`);
-      } catch (err) {
-        showToast("Upload error: " + err.message);
+      } else {
+        showToast("Failed to upload attachments to card");
       }
+    } catch (err) {
+      showToast("Upload error: " + err.message);
     }
   });
 }

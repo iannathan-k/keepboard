@@ -1057,7 +1057,12 @@ main.sidebar-collapsed {
 }
 .card.drop-target {
   border: 2px dashed var(--accent) !important;
-  background: rgba(138, 180, 248, 0.12) !important;
+  background: rgba(138, 180, 248, 0.22) !important;
+  box-shadow: 0 0 0 3px var(--accent-muted), 0 8px 24px rgba(0, 0, 0, 0.45) !important;
+  position: relative;
+  z-index: 1100 !important;
+  transform: scale(1.02);
+  transition: transform 0.12s ease, border-color 0.12s ease;
 }
 
 /* Selection Checkmark */
@@ -1497,6 +1502,56 @@ main.sidebar-collapsed {
 }
 .card-actions .btn-icon svg { width: 14px; height: 14px; }
 
+/* Card More (⋮) Overflow Menu */
+.card-more-popover {
+  position: absolute;
+  bottom: 34px;
+  left: 30px;
+  background: #25272c;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  z-index: 200;
+  min-width: 185px;
+  display: none;
+  flex-direction: column;
+  padding: 4px 0;
+  animation: fadeIn 0.12s ease;
+}
+.card-more-popover.show {
+  display: flex;
+}
+.card-more-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text-sub);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  font-family: var(--font);
+  transition: background 0.12s, color 0.12s;
+}
+.card-more-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.card-more-item svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  flex-shrink: 0;
+}
+.card-more-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
 /* ── Modals General ──────────────────────────────────────────────────────── */
 .modal-backdrop {
   position: fixed;
@@ -1687,6 +1742,25 @@ main.sidebar-collapsed {
   color: var(--text);
   word-break: break-word;
 }
+.split-pane-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-elevated);
+  gap: 4px;
+  overflow-x: auto;
+}
+.split-pane-footer .btn-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+}
+.split-pane-footer .btn-icon svg {
+  width: 14px;
+  height: 14px;
+}
 
 /* Spotlight Command Palette (Cmd+K) */
 #cmd-palette-backdrop {
@@ -1862,7 +1936,8 @@ main.sidebar-collapsed {
 #drop-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(19, 19, 20, 0.92);
+  background: rgba(19, 19, 20, 0.75);
+  backdrop-filter: blur(2px);
   border: 3px dashed var(--accent);
   z-index: 1000;
   display: none;

@@ -140,6 +140,23 @@ export function deleteCheckedItems(items) {
   return items.filter(it => !it.checked);
 }
 
+export function convertTextToChecklist(text) {
+  if (!text) return [];
+  // Strip simple HTML tags if present
+  const clean = text.replace(/<br\s*[\/]?>/gi, "\n").replace(/<[^>]+>/g, "");
+  const lines = clean.split("\n").map(l => l.trim()).filter(Boolean);
+  return lines.map(line => ({
+    text: line.replace(/^[-*•\d\.\s\[\]x]+/, "").trim() || line,
+    checked: false,
+    indent: 0,
+  }));
+}
+
+export function convertChecklistToText(items) {
+  if (!items || items.length === 0) return "";
+  return items.map(it => `<div>${it.checked ? "☑ " : "☐ "}${it.text || ""}</div>`).join("");
+}
+
 export function renderChecklistEditor(container, items, onChange) {
   container.innerHTML = "";
   const wrapper = document.createElement("div");

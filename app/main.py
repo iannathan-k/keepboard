@@ -2212,15 +2212,19 @@ async def batch_move_workspace(payload: BatchMoveWorkspaceRequest):
 @app.get("/api/vault/status")
 async def vault_status():
     meta = read_vault_meta()
-    return {"configured": bool(meta.get("password_hash"))}
+    return {"configured": bool(meta.get("password_hash")), "ok": True}
 
 
-@app.post("/api/vault/setup")
 @app.post("/api/vault/set-password")
-async def vault_setup(payload: dict):
+@app.post("/api/vault/setup")
+async def vault_set_password(request: Request):
     meta = read_vault_meta()
     if meta.get("password_hash"):
         raise HTTPException(status_code=409, detail="Vault password already configured.")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
     pw = payload.get("password") or payload.get("new_password") or payload.get("master_password") or ""
     if len(pw) < 4:
         raise HTTPException(status_code=400, detail="Password must be at least 4 characters.")
@@ -2239,14 +2243,18 @@ async def vault_setup(payload: dict):
 
 @app.post("/api/vault/unlock")
 @app.post("/api/vault/verify")
-async def vault_unlock(payload: dict):
+async def vault_unlock(request: Request):
     meta = read_vault_meta()
     if not meta.get("password_hash"):
         raise HTTPException(status_code=404, detail="Vault not configured.")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
     pw = payload.get("password") or payload.get("master_password") or ""
     salt = meta.get("salt", "")
     candidate = _hash_password(pw, salt)
-    if not secrets.compare_digest(candidate, meta["password_hash"]):
+    if not secrets.compare_digest(candidate, meta.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Incorrect vault password.")
     token = _new_vault_token()
     vault_sessions[token] = int(time.time() * 1000) + VAULT_SESSION_TTL_MS

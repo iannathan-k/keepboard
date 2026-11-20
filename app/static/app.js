@@ -14,6 +14,8 @@ import {
   uncheckAllItems,
   deleteCheckedItems,
   renderChecklistEditor,
+  convertTextToChecklist,
+  convertChecklistToText,
 } from "./editor.js";
 
 import {
@@ -23,6 +25,16 @@ import {
   VoiceMemoRecorder,
   createQRCodeSVG,
 } from "./media.js";
+
+// Prevent default browser file-drop behavior (navigation/preview) globally immediately on module load
+if (typeof window !== "undefined") {
+  window.addEventListener("dragover", (e) => {
+    e.preventDefault();
+  }, false);
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+  }, false);
+}
 
 // ── Constants & Color Palettes ─────────────────────────────────────────────
 const PALETTES = {
@@ -198,10 +210,20 @@ const modalRawTextarea = document.getElementById("modal-raw-textarea");
 const modalChecklistContainer = document.getElementById("modal-checklist-container");
 const modalAttachmentsList = document.getElementById("modal-attachments-list");
 const modalFmtToggleBtn = document.getElementById("modal-fmt-toggle-btn");
+const modalChecklistBtn = document.getElementById("modal-checklist-btn");
 const modalRawToggleBtn = document.getElementById("modal-raw-toggle-btn");
 const modalColorBtn = document.getElementById("modal-color-btn");
 const modalColorPopover = document.getElementById("modal-color-popover");
 const modalAttachBtn = document.getElementById("modal-attach-btn");
+const modalVoiceBtn = document.getElementById("modal-voice-btn");
+const modalVoiceBar = document.getElementById("modal-voice-bar");
+const modalVoiceTimer = document.getElementById("modal-voice-timer");
+const modalVoiceCancelBtn = document.getElementById("modal-voice-cancel-btn");
+const modalVoiceDoneBtn = document.getElementById("modal-voice-done-btn");
+const modalShieldBtn = document.getElementById("modal-shield-btn");
+const modalTagBtn = document.getElementById("modal-tag-btn");
+const modalWorkspaceBtn = document.getElementById("modal-workspace-btn");
+const modalWorkspacePopover = document.getElementById("modal-workspace-popover");
 const modalSplitBtn = document.getElementById("modal-split-btn");
 const modalQrBtn = document.getElementById("modal-qr-btn");
 const modalDuplicateBtn = document.getElementById("modal-duplicate-btn");
@@ -1062,11 +1084,11 @@ function createCardElement(note) {
     card.appendChild(metaRow);
   }
 
-  // ── Card Hover Actions Bar ───────────────────────────────────────────────
+  // ── Card Hover Actions Bar (Minimal: Color, Archive, Split, More ⋮) ─────
   const actionsBar = document.createElement("div");
   actionsBar.className = "card-actions";
 
-  // 1. Color Picker
+  // 1. Color Palette
   const colorWrap = document.createElement("div");
   colorWrap.style.position = "relative";
   const colorBtn = document.createElement("button");
@@ -1078,96 +1100,14 @@ function createCardElement(note) {
   renderSwatches(colorPopover, (newColor) => updateNoteColor(note.id, newColor), note.color);
   colorBtn.onclick = (e) => {
     e.stopPropagation();
+    document.querySelectorAll(".card-more-popover.show, .card-ws-popover").forEach((p) => p.classList.remove("show"));
     colorPopover.classList.toggle("show");
   };
   colorWrap.appendChild(colorBtn);
   colorWrap.appendChild(colorPopover);
   actionsBar.appendChild(colorWrap);
 
-  // 2. Add File Attachment
-  const attachBtn = document.createElement("button");
-  attachBtn.className = "btn-icon";
-  attachBtn.title = "Add file";
-  attachBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>`;
-  attachBtn.onclick = (e) => {
-    e.stopPropagation();
-    cardActionFileInput.onchange = async () => {
-      if (cardActionFileInput.files.length > 0) {
-        await uploadFilesToNote(note.id, Array.from(cardActionFileInput.files));
-        cardActionFileInput.value = "";
-      }
-    };
-    cardActionFileInput.click();
-  };
-  actionsBar.appendChild(attachBtn);
-
-  // 3. Save to Disk Toggle (Hybrid RAM + Disk Shield)
-  const shieldBtn = document.createElement("button");
-  shieldBtn.className = `btn-icon ${note.saved_to_disk ? "active" : ""}`;
-  shieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
-  shieldBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>`;
-  shieldBtn.onclick = (e) => {
-    e.stopPropagation();
-    togglePersistNote(note.id);
-  };
-  actionsBar.appendChild(shieldBtn);
-
-  // 4. Bump to Top
-  const bumpBtn = document.createElement("button");
-  bumpBtn.className = "btn-icon";
-  bumpBtn.title = "Bump note to top";
-  bumpBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/></svg>`;
-  bumpBtn.onclick = (e) => {
-    e.stopPropagation();
-    bumpNote(note.id);
-  };
-  actionsBar.appendChild(bumpBtn);
-
-  // 5. Remind / Snooze
-  const snoozeBtn = document.createElement("button");
-  snoozeBtn.className = "btn-icon";
-  snoozeBtn.title = "Remind me (Snooze)";
-  snoozeBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>`;
-  snoozeBtn.onclick = (e) => {
-    e.stopPropagation();
-    snoozeNotePrompt(note.id);
-  };
-  actionsBar.appendChild(snoozeBtn);
-
-  // 6. QR Code Share
-  const qrBtn = document.createElement("button");
-  qrBtn.className = "btn-icon";
-  qrBtn.title = "Share via QR code";
-  qrBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M3 3h8v8H3zm2 2v4h4V5zm8-2h8v8h-8zm2 2v4h4V5zM3 13h8v8H3zm2 2v4h4v-4zm13-2h3v2h-3zm-3 2h3v2h-3zm3 2h3v2h-3zm-3 2h3v2h-3zm-2-4h2v2h-2zm4 4h2v2h-2z"/></svg>`;
-  qrBtn.onclick = (e) => {
-    e.stopPropagation();
-    showQRCode(note);
-  };
-  actionsBar.appendChild(qrBtn);
-
-  // 7. Split Workspace Toggle
-  const splitBtn = document.createElement("button");
-  splitBtn.className = "btn-icon";
-  splitBtn.title = "Open in Split Workspace (or ⌘/Ctrl+Click)";
-  splitBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 16H5V5h6v14zm8 0h-6V5h6v14z"/></svg>`;
-  splitBtn.onclick = (e) => {
-    e.stopPropagation();
-    toggleSplitPane(note.id);
-  };
-  actionsBar.appendChild(splitBtn);
-
-  // 8. Move to Workspace
-  const wsBtn = document.createElement("button");
-  wsBtn.className = "btn-icon";
-  wsBtn.title = "Move to workspace";
-  wsBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>`;
-  wsBtn.onclick = (e) => {
-    e.stopPropagation();
-    showMoveWorkspacePopover(note.id, wsBtn);
-  };
-  actionsBar.appendChild(wsBtn);
-
-  // 9. Archive / Unarchive
+  // 2. Archive / Unarchive
   const archBtn = document.createElement("button");
   archBtn.className = "btn-icon";
   archBtn.title = note.is_archived ? "Unarchive" : "Archive";
@@ -1178,25 +1118,124 @@ function createCardElement(note) {
   };
   actionsBar.appendChild(archBtn);
 
-  // 10. Trash / Delete
-  const trashBtn = document.createElement("button");
-  trashBtn.className = "btn-icon";
+  // 3. Open in Split Pane
+  const splitBtn = document.createElement("button");
+  splitBtn.className = "btn-icon";
+  splitBtn.title = "Open in Split Pane (or ⌘/Ctrl+Click)";
+  splitBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 16H5V5h6v14zm8 0h-6V5h6v14z"/></svg>`;
+  splitBtn.onclick = (e) => {
+    e.stopPropagation();
+    toggleSplitPane(note.id);
+  };
+  actionsBar.appendChild(splitBtn);
+
+  // 4. More (⋮) Overflow Menu
+  const moreWrap = document.createElement("div");
+  moreWrap.style.position = "relative";
+  const moreBtn = document.createElement("button");
+  moreBtn.className = "btn-icon";
+  moreBtn.title = "More";
+  moreBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>`;
+
+  const morePopover = document.createElement("div");
+  morePopover.className = "card-more-popover";
+
+  // Move to Workspace
+  const wsItem = document.createElement("button");
+  wsItem.className = "card-more-item";
+  wsItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg><span>Move to workspace</span>`;
+  wsItem.onclick = (e) => {
+    e.stopPropagation();
+    morePopover.classList.remove("show");
+    showMoveWorkspacePopover(note.id, moreBtn);
+  };
+  morePopover.appendChild(wsItem);
+
+  // Labels
+  const tagItem = document.createElement("button");
+  tagItem.className = "card-more-item";
+  tagItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16zM16 17H5V7h11l3.55 5L16 17z"/></svg><span>Labels</span>`;
+  tagItem.onclick = (e) => {
+    e.stopPropagation();
+    morePopover.classList.remove("show");
+    openTagPromptModal(async (tag) => {
+      if (!tag) return;
+      const curTags = new Set(note.tags || []);
+      curTags.add(tag);
+      await addTagToNote(note.id, Array.from(curTags));
+    });
+  };
+  morePopover.appendChild(tagItem);
+
+  // Persist on Disk (Shield)
+  const persistItem = document.createElement("button");
+  persistItem.className = "card-more-item";
+  persistItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg><span>${note.saved_to_disk ? "Remove from disk" : "Persist on disk (Shield)"}</span>`;
+  persistItem.onclick = (e) => {
+    e.stopPropagation();
+    morePopover.classList.remove("show");
+    togglePersistNote(note.id);
+  };
+  morePopover.appendChild(persistItem);
+
+  // Lock in Vault
+  const vaultItem = document.createElement("button");
+  vaultItem.className = "card-more-item";
+  vaultItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg><span>Lock in vault</span>`;
+  vaultItem.onclick = (e) => {
+    e.stopPropagation();
+    morePopover.classList.remove("show");
+    lockNoteInVault(note.id);
+  };
+  morePopover.appendChild(vaultItem);
+
+  // Duplicate
+  const dupItem = document.createElement("button");
+  dupItem.className = "card-more-item";
+  dupItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg><span>Duplicate</span>`;
+  dupItem.onclick = (e) => {
+    e.stopPropagation();
+    morePopover.classList.remove("show");
+    duplicateNote(note.id);
+  };
+  morePopover.appendChild(dupItem);
+
+  // Divider
+  const moreDivider = document.createElement("div");
+  moreDivider.className = "card-more-divider";
+  morePopover.appendChild(moreDivider);
+
+  // Delete / Restore
+  const delItem = document.createElement("button");
+  delItem.className = "card-more-item";
   if (note.is_trash) {
-    trashBtn.title = "Restore from Trash";
-    trashBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z"/></svg>`;
-    trashBtn.onclick = (e) => {
+    delItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z"/></svg><span>Restore</span>`;
+    delItem.onclick = (e) => {
       e.stopPropagation();
+      morePopover.classList.remove("show");
       restoreNote(note.id);
     };
   } else {
-    trashBtn.title = "Move to Trash";
-    trashBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>`;
-    trashBtn.onclick = (e) => {
+    delItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg><span>Delete</span>`;
+    delItem.onclick = (e) => {
       e.stopPropagation();
+      morePopover.classList.remove("show");
       trashNote(note.id);
     };
   }
-  actionsBar.appendChild(trashBtn);
+  morePopover.appendChild(delItem);
+
+  moreBtn.onclick = (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".color-popover.show, .card-more-popover.show, .card-ws-popover").forEach((p) => {
+      if (p !== morePopover) p.classList.remove("show");
+    });
+    morePopover.classList.toggle("show");
+  };
+
+  moreWrap.appendChild(moreBtn);
+  moreWrap.appendChild(morePopover);
+  actionsBar.appendChild(moreWrap);
 
   card.appendChild(actionsBar);
 
@@ -1502,6 +1541,10 @@ async function openEditModal(noteId) {
 
   editModalCard.style.backgroundColor = paletteFor(modalColor);
   modalPinBtn.style.color = modalIsPinned ? "var(--accent)" : "inherit";
+  if (modalShieldBtn) {
+    modalShieldBtn.classList.toggle("active", Boolean(note.saved_to_disk));
+    modalShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
+  }
 
   renderModalTags();
   renderModalAttachments(note.attachments || []);
@@ -1575,9 +1618,13 @@ async function closeEditModal() {
     tags: Array.from(modalTags),
   };
 
-  if (modalChecklistItems.length > 0) {
+  const isChecklist = modalChecklistContainer.style.display !== "none";
+  if (isChecklist && modalChecklistItems.length > 0) {
     payload.checklist = modalChecklistItems;
     payload.is_checklist = true;
+  } else if (!isChecklist) {
+    payload.checklist = [];
+    payload.is_checklist = false;
   }
 
   try {
@@ -1698,57 +1745,6 @@ function renderSplitWorkspace() {
       renderNotesGrid();
     };
     tools.appendChild(pinBtn);
-
-    // Color Swatch Button & Popover
-    const colorWrapper = document.createElement("div");
-    colorWrapper.style.position = "relative";
-    colorWrapper.style.display = "inline-flex";
-
-    const colorBtn = document.createElement("button");
-    colorBtn.className = "btn-icon";
-    colorBtn.title = "Change color";
-    colorBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.27 19.59 10.58 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/></svg>`;
-
-    const colorPopover = document.createElement("div");
-    colorPopover.className = "color-popover";
-    renderSwatches(colorPopover, async (c) => {
-      note.color = c;
-      pane.style.backgroundColor = paletteFor(c);
-      await fetch(`/api/notes/${note.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...vaultHeaders() },
-        body: JSON.stringify({ color: c }),
-      });
-      renderNotesGrid();
-    });
-
-    colorBtn.onclick = (e) => {
-      e.stopPropagation();
-      colorPopover.classList.toggle("show");
-    };
-
-    colorWrapper.appendChild(colorBtn);
-    colorWrapper.appendChild(colorPopover);
-    tools.appendChild(colorWrapper);
-
-    // Persist Shield Button
-    const shieldBtn = document.createElement("button");
-    shieldBtn.className = `btn-icon ${note.is_vault ? "active" : ""}`;
-    shieldBtn.title = note.is_vault ? "In Vault (Protected)" : "Move to Vault";
-    shieldBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>`;
-    shieldBtn.onclick = async () => {
-      const newVault = !note.is_vault;
-      note.is_vault = newVault;
-      shieldBtn.classList.toggle("active", newVault);
-      await fetch(`/api/notes/${note.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...vaultHeaders() },
-        body: JSON.stringify({ is_vault: newVault }),
-      });
-      showToast(newVault ? "Protected in Vault" : "Moved out of Vault");
-      renderNotesGrid();
-    };
-    tools.appendChild(shieldBtn);
 
     // Close × Button
     const closeBtn = document.createElement("button");
@@ -1886,21 +1882,235 @@ function renderSplitWorkspace() {
 
     if (note.attachments && note.attachments.length > 0) {
       const attachDiv = document.createElement("div");
-      attachDiv.className = "card-attachments";
+      attachDiv.className = "attachment-list";
       attachDiv.style.marginTop = "auto";
       attachDiv.style.paddingTop = "8px";
       note.attachments.forEach((att) => {
-        const pill = document.createElement("a");
+        const pill = document.createElement("div");
         pill.className = "attachment-pill";
-        pill.href = `/api/attachments/${att.filename}`;
-        pill.target = "_blank";
-        pill.innerHTML = `📎 <span>${escapeHtml(att.filename)}</span>`;
+        pill.innerHTML = `
+          <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+          <a href="/api/files/${att.id}?download=true" class="attachment-name">${escapeHtml(att.filename)}</a>
+        `;
         attachDiv.appendChild(pill);
       });
       body.appendChild(attachDiv);
     }
 
     pane.appendChild(body);
+
+    // ── Split Pane Footer Toolbar (Full Controls) ───────────────────────────
+    const footer = document.createElement("div");
+    footer.className = "split-pane-footer";
+
+    // 1. Formatting Aa Toggle
+    const fmtBtn = document.createElement("button");
+    fmtBtn.className = "btn-icon";
+    fmtBtn.title = "Formatting (Bold / Italic)";
+    fmtBtn.innerHTML = `<span style="font-size:13px; font-weight:700;">Aa</span>`;
+    fmtBtn.onclick = (e) => {
+      e.stopPropagation();
+      document.execCommand("bold", false, null);
+    };
+    footer.appendChild(fmtBtn);
+
+    // 2. Checklist Toggle
+    const checkToggleBtn = document.createElement("button");
+    checkToggleBtn.className = "btn-icon";
+    checkToggleBtn.title = "Toggle checklist";
+    checkToggleBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>`;
+    checkToggleBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (note.is_checklist) {
+        const text = convertChecklistToText(checklistItems);
+        note.is_checklist = false;
+        note.checklist = [];
+        note.content = text;
+        note.text = text;
+        await fetch(`/api/notes/${note.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...vaultHeaders() },
+          body: JSON.stringify({ is_checklist: false, checklist: [], text, content: text }),
+        });
+      } else {
+        const text = editor ? (editor.innerText || editor.textContent || "") : (note.content || "");
+        const items = convertTextToChecklist(text);
+        note.is_checklist = true;
+        note.checklist = items.length > 0 ? items : [{ text: "", checked: false }];
+        await fetch(`/api/notes/${note.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...vaultHeaders() },
+          body: JSON.stringify({ is_checklist: true, checklist: note.checklist }),
+        });
+      }
+      renderSplitWorkspace();
+      renderNotesGrid();
+    };
+    footer.appendChild(checkToggleBtn);
+
+    // 3. Attach File Paperclip
+    const splitAttachBtn = document.createElement("button");
+    splitAttachBtn.className = "btn-icon";
+    splitAttachBtn.title = "Add attachment";
+    splitAttachBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>`;
+    splitAttachBtn.onclick = (e) => {
+      e.stopPropagation();
+      cardActionFileInput.onchange = async (ev) => {
+        ev.preventDefault();
+        if (cardActionFileInput.files && cardActionFileInput.files.length > 0) {
+          await uploadFilesToNote(note.id, Array.from(cardActionFileInput.files));
+          cardActionFileInput.value = "";
+          await loadNotes(false);
+          renderSplitWorkspace();
+        }
+      };
+      cardActionFileInput.click();
+    };
+    footer.appendChild(splitAttachBtn);
+
+    // 4. Voice Memo Recorder
+    const splitVoiceBtn = document.createElement("button");
+    splitVoiceBtn.className = "btn-icon";
+    splitVoiceBtn.title = "Record voice memo";
+    splitVoiceBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>`;
+    splitVoiceBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (activeVoiceRecorder && activeVoiceRecorder.isRecording) {
+        activeVoiceRecorder.stop();
+        return;
+      }
+      activeVoiceRecorder = new VoiceMemoRecorder({
+        showToast,
+        onAudioReady: async (audioFile) => {
+          if (audioFile) {
+            await uploadFilesToNote(note.id, [audioFile]);
+            await loadNotes(false);
+            renderSplitWorkspace();
+          }
+        },
+      });
+      activeVoiceRecorder.start();
+    };
+    footer.appendChild(splitVoiceBtn);
+
+    // 5. Persist on Disk Shield
+    const splitShieldBtn = document.createElement("button");
+    splitShieldBtn.className = `btn-icon ${note.saved_to_disk ? "active" : ""}`;
+    splitShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
+    splitShieldBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>`;
+    splitShieldBtn.onclick = async (e) => {
+      e.stopPropagation();
+      await togglePersistNote(note.id);
+      note.saved_to_disk = !note.saved_to_disk;
+      splitShieldBtn.classList.toggle("active", note.saved_to_disk);
+      splitShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
+    };
+    footer.appendChild(splitShieldBtn);
+
+    // 6. Labels (#)
+    const splitTagBtn = document.createElement("button");
+    splitTagBtn.className = "btn-icon";
+    splitTagBtn.title = "Add label (#)";
+    splitTagBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16zM16 17H5V7h11l3.55 5L16 17z"/></svg>`;
+    splitTagBtn.onclick = (e) => {
+      e.stopPropagation();
+      openTagPromptModal(async (tag) => {
+        if (!tag) return;
+        const curTags = new Set(note.tags || []);
+        curTags.add(tag);
+        await addTagToNote(note.id, Array.from(curTags));
+        renderSplitWorkspace();
+      });
+    };
+    footer.appendChild(splitTagBtn);
+
+    // 7. Workspace Selector
+    const splitWsWrap = document.createElement("div");
+    splitWsWrap.style.position = "relative";
+    splitWsWrap.style.display = "inline-flex";
+    const splitWsBtn = document.createElement("button");
+    splitWsBtn.className = "btn-icon";
+    splitWsBtn.title = "Move to workspace";
+    splitWsBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>`;
+    const splitWsPopover = document.createElement("div");
+    splitWsPopover.className = "workspace-popover";
+    splitWsBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (splitWsPopover.classList.contains("show")) {
+        splitWsPopover.classList.remove("show");
+        return;
+      }
+      splitWsPopover.innerHTML = "";
+      allWorkspaces.forEach((ws) => {
+        const item = document.createElement("button");
+        item.className = "workspace-item-row";
+        item.textContent = ws.name;
+        item.onclick = async (ev) => {
+          ev.stopPropagation();
+          splitWsPopover.classList.remove("show");
+          await moveNoteToWorkspace(note.id, ws.id);
+        };
+        splitWsPopover.appendChild(item);
+      });
+      splitWsPopover.classList.add("show");
+    };
+    splitWsWrap.appendChild(splitWsBtn);
+    splitWsWrap.appendChild(splitWsPopover);
+    footer.appendChild(splitWsWrap);
+
+    // 8. Color Palette
+    const splitColorWrap = document.createElement("div");
+    splitColorWrap.style.position = "relative";
+    splitColorWrap.style.display = "inline-flex";
+    const splitColorBtn = document.createElement("button");
+    splitColorBtn.className = "btn-icon";
+    splitColorBtn.title = "Change color";
+    splitColorBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c3.31 0 6-2.69 6-6 0-4.96-4.49-9-10-9zm-5.5 11c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-4C8.67 9 8 8.33 8 7.5S8.67 6 9.5 6s1.5.67 1.5 1.5S10.33 9 9.5 9zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 6 14.5 6s1.5.67 1.5 1.5S15.33 9 14.5 9zm3 4c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>`;
+    const splitColorPopover = document.createElement("div");
+    splitColorPopover.className = "color-popover";
+    renderSwatches(splitColorPopover, async (c) => {
+      note.color = c;
+      pane.style.backgroundColor = paletteFor(c);
+      await fetch(`/api/notes/${note.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...vaultHeaders() },
+        body: JSON.stringify({ color: c }),
+      });
+      renderNotesGrid();
+    }, note.color);
+    splitColorBtn.onclick = (e) => {
+      e.stopPropagation();
+      splitColorPopover.classList.toggle("show");
+    };
+    splitColorWrap.appendChild(splitColorBtn);
+    splitColorWrap.appendChild(splitColorPopover);
+    footer.appendChild(splitColorWrap);
+
+    // 9. Archive / Unarchive
+    const splitArchBtn = document.createElement("button");
+    splitArchBtn.className = "btn-icon";
+    splitArchBtn.title = note.is_archived ? "Unarchive" : "Archive";
+    splitArchBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM6.24 5h11.52l.83 1H5.42l.82-1zM5 19V8h14v11H5zm7-2l5-5h-3.5V9h-3v3H7l5 5z"/></svg>`;
+    splitArchBtn.onclick = async (e) => {
+      e.stopPropagation();
+      await toggleNoteArchive(note.id, !note.is_archived);
+      closeSplitPane(note.id);
+    };
+    footer.appendChild(splitArchBtn);
+
+    // 10. Delete Note
+    const splitTrashBtn = document.createElement("button");
+    splitTrashBtn.className = "btn-icon";
+    splitTrashBtn.title = "Delete note";
+    splitTrashBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>`;
+    splitTrashBtn.onclick = async (e) => {
+      e.stopPropagation();
+      await trashNote(note.id);
+      closeSplitPane(note.id);
+    };
+    footer.appendChild(splitTrashBtn);
+
+    pane.appendChild(footer);
     splitPanesContainer.appendChild(pane);
   });
 }
@@ -2015,6 +2225,96 @@ function switchWorkspace(wsId) {
   renderWorkspaceSwitcher();
   renderSidebarTags();
   renderNotesGrid();
+}
+
+async function moveNoteToWorkspace(noteId, wsId) {
+  const ws = allWorkspaces.find((w) => w.id === wsId);
+  const note = allNotes.find((n) => n.id === noteId);
+  try {
+    const res = await fetch(`/api/notes/${noteId}/move-workspace`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...vaultHeaders() },
+      body: JSON.stringify({ workspace: wsId }),
+    });
+    if (res.ok) {
+      if (note) note.workspace = wsId;
+      showToast(`Moved note to ${ws ? ws.name : wsId}`);
+      await loadNotes();
+    } else {
+      showToast("Failed to move note");
+    }
+  } catch (err) {
+    showToast("Error moving note");
+  }
+}
+
+async function addTagToNote(noteId, tags) {
+  try {
+    const res = await fetch(`/api/notes/${noteId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        ...vaultHeaders(),
+      },
+      body: JSON.stringify({ tags }),
+    });
+    if (res.ok) {
+      const note = allNotes.find((n) => n.id === noteId);
+      if (note) note.tags = tags;
+      showToast("Label added");
+      await loadNotes(false);
+    }
+  } catch (err) {
+    showToast("Error updating labels");
+  }
+}
+
+async function duplicateNote(noteId) {
+  try {
+    const res = await fetch(`/api/notes/${noteId}/duplicate`, {
+      method: "POST",
+      headers: vaultHeaders(),
+    });
+    if (res.ok) {
+      showToast("Note duplicated");
+      await loadNotes();
+    } else {
+      showToast("Failed to duplicate note");
+    }
+  } catch (err) {
+    showToast("Error duplicating note");
+  }
+}
+
+async function lockNoteInVault(noteId) {
+  if (!vaultConfigured) {
+    showToast("Configure Vault password first");
+    promptVaultPassword(true);
+    return;
+  }
+  if (!vaultUnlocked || !vaultToken) {
+    showToast("Unlock Vault first to protect notes");
+    promptVaultPassword(false);
+    return;
+  }
+  try {
+    const res = await fetch(`/api/notes/${noteId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        ...vaultHeaders(),
+      },
+      body: JSON.stringify({ is_vault: true }),
+    });
+    if (res.ok) {
+      showToast("Note moved to Vault (Protected)");
+      await loadNotes();
+    } else {
+      showToast("Failed to move note to Vault");
+    }
+  } catch (err) {
+    showToast("Error protecting note in Vault");
+  }
 }
 
 function showMoveWorkspacePopover(noteId, anchorEl) {
@@ -2531,7 +2831,7 @@ function promptVaultPassword(isSetup = false) {
         vaultModalError.style.display = "block";
       }
     } else {
-      const res = await fetch("/api/vault/verify", {
+      const res = await fetch("/api/vault/unlock", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: pw }),
@@ -2818,8 +3118,13 @@ function setupEventListeners() {
   };
 
   // File Attachments in Composer
-  composerAttachBtn.onclick = () => composerFileInput.click();
-  composerFileInput.onchange = () => {
+  composerAttachBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    composerFileInput.click();
+  };
+  composerFileInput.onchange = (e) => {
+    e.preventDefault();
     if (composerFileInput.files.length > 0) {
       Array.from(composerFileInput.files).forEach((f) => composerPendingFiles.push(f));
       renderComposerPendingFiles();
@@ -2828,14 +3133,129 @@ function setupEventListeners() {
   };
 
   // Modal Attachments
-  modalAttachBtn.onclick = () => modalFileInput.click();
-  modalFileInput.onchange = async () => {
+  modalAttachBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    modalFileInput.click();
+  };
+  modalFileInput.onchange = async (e) => {
+    e.preventDefault();
     if (modalFileInput.files.length > 0 && currentEditingNoteId) {
       await uploadFilesToNote(currentEditingNoteId, Array.from(modalFileInput.files));
       modalFileInput.value = "";
       const updated = allNotes.find((n) => n.id === currentEditingNoteId);
       if (updated) renderModalAttachments(updated.attachments || []);
     }
+  };
+
+  // Modal Checklists Toggle
+  modalChecklistBtn.onclick = () => {
+    const isCurrentlyChecklist = modalChecklistContainer.style.display !== "none";
+    if (isCurrentlyChecklist) {
+      const text = convertChecklistToText(modalChecklistItems);
+      modalRichEditor.innerHTML = text;
+      modalChecklistContainer.style.display = "none";
+      modalRichEditor.style.display = "block";
+      modalChecklistItems = [];
+    } else {
+      const text = modalRichEditor.innerText || modalRichEditor.textContent || "";
+      modalChecklistItems = convertTextToChecklist(text);
+      if (modalChecklistItems.length === 0) {
+        modalChecklistItems = [{ text: "", checked: false }];
+      }
+      modalRichEditor.style.display = "none";
+      modalChecklistContainer.style.display = "block";
+      renderChecklistEditor(modalChecklistContainer, modalChecklistItems, (updated) => {
+        modalChecklistItems = updated;
+      });
+    }
+  };
+
+  // Modal Voice Memo Recorder
+  let modalVoiceRecorder = null;
+  modalVoiceBtn.onclick = async () => {
+    if (modalVoiceRecorder && modalVoiceRecorder.isRecording) {
+      modalVoiceRecorder.stop();
+      return;
+    }
+    modalVoiceBar.style.display = "flex";
+    modalVoiceRecorder = new VoiceMemoRecorder({
+      timerEl: modalVoiceTimer,
+      showToast,
+      onAudioReady: async (audioFile) => {
+        if (currentEditingNoteId && audioFile) {
+          await uploadFilesToNote(currentEditingNoteId, [audioFile]);
+          const updated = allNotes.find((n) => n.id === currentEditingNoteId);
+          if (updated) renderModalAttachments(updated.attachments || []);
+        }
+        modalVoiceBar.style.display = "none";
+      },
+    });
+    const started = await modalVoiceRecorder.start();
+    if (!started) {
+      modalVoiceBar.style.display = "none";
+    }
+  };
+
+  modalVoiceCancelBtn.onclick = () => {
+    if (modalVoiceRecorder) modalVoiceRecorder.cancel();
+    modalVoiceBar.style.display = "none";
+  };
+
+  modalVoiceDoneBtn.onclick = () => {
+    if (modalVoiceRecorder) modalVoiceRecorder.stop();
+    modalVoiceBar.style.display = "none";
+  };
+
+  // Modal Shield Toggle
+  modalShieldBtn.onclick = async () => {
+    if (!currentEditingNoteId) return;
+    const note = allNotes.find((n) => n.id === currentEditingNoteId);
+    if (!note) return;
+    const newSaved = !note.saved_to_disk;
+    note.saved_to_disk = newSaved;
+    modalShieldBtn.classList.toggle("active", newSaved);
+    modalShieldBtn.title = newSaved ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
+    await fetch(`/api/notes/${note.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...vaultHeaders() },
+      body: JSON.stringify({ saved_to_disk: newSaved }),
+    });
+    showToast(newSaved ? "Saved to persistent disk (/persist)" : "Removed from persistent disk");
+    renderNotesGrid();
+  };
+
+  // Modal Labels Prompt
+  modalTagBtn.onclick = () => {
+    openTagPromptModal((tag) => {
+      modalTags.add(tag);
+      renderModalTags();
+    });
+  };
+
+  // Modal Move to Workspace
+  modalWorkspaceBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (modalWorkspacePopover.classList.contains("show")) {
+      modalWorkspacePopover.classList.remove("show");
+      return;
+    }
+    modalWorkspacePopover.innerHTML = "";
+    allWorkspaces.forEach((ws) => {
+      const item = document.createElement("button");
+      item.className = "workspace-item-row";
+      item.textContent = ws.name;
+      item.onclick = async (ev) => {
+        ev.stopPropagation();
+        modalWorkspacePopover.classList.remove("show");
+        if (currentEditingNoteId) {
+          await moveNoteToWorkspace(currentEditingNoteId, ws.id);
+          closeEditModal();
+        }
+      };
+      modalWorkspacePopover.appendChild(item);
+    });
+    modalWorkspacePopover.classList.add("show");
   };
 
   // Tags Prompt
@@ -2931,7 +3351,13 @@ function setupEventListeners() {
   // Vault Buttons
   vaultSetupBtn.onclick = () => promptVaultPassword(true);
   vaultUnlockBtn.onclick = () => promptVaultPassword(false);
-  vaultLockBtn.onclick = () => {
+  vaultLockBtn.onclick = async () => {
+    try {
+      await fetch("/api/vault/lock", {
+        method: "POST",
+        headers: vaultHeaders(),
+      });
+    } catch (e) {}
     vaultToken = null;
     sessionStorage.removeItem("keepboard_vault_token");
     vaultUnlocked = false;
@@ -2946,30 +3372,36 @@ function setupEventListeners() {
 
   // Full-Window Drag and Drop Anywhere
   window.addEventListener("dragenter", (e) => {
-    if (e.dataTransfer.types && e.dataTransfer.types.includes("Files")) {
-      dropOverlay.style.display = "flex";
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      if (!e.target.closest || !e.target.closest(".card")) {
+        dropOverlay.style.display = "flex";
+      }
     }
   });
 
-  dropOverlay.addEventListener("dragover", (e) => {
+  window.addEventListener("dragover", (e) => {
     e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = "copy";
+    }
   });
 
-  dropOverlay.addEventListener("dragleave", (e) => {
-    if (e.relatedTarget === null) {
+  window.addEventListener("dragleave", (e) => {
+    if (!e.relatedTarget || e.clientY <= 0 || e.clientX <= 0 || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
       dropOverlay.style.display = "none";
     }
   });
 
-  dropOverlay.addEventListener("drop", async (e) => {
+  window.addEventListener("drop", async (e) => {
     e.preventDefault();
     dropOverlay.style.display = "none";
+    document.querySelectorAll(".card.drop-target").forEach((c) => c.classList.remove("drop-target"));
 
-    const files = Array.from(e.dataTransfer.files);
+    const files = Array.from(e.dataTransfer?.files || []);
     if (files.length === 0) return;
 
     // If composer is open, add to composer attachments
-    if (captureExpanded.style.display === "flex") {
+    if (captureExpanded && captureExpanded.style.display === "flex") {
       files.forEach((f) => composerPendingFiles.push(f));
       renderComposerPendingFiles();
       showToast(`${files.length} file(s) attached to draft`);
@@ -2993,6 +3425,8 @@ function setupEventListeners() {
         showToast(`Created note with ${files.length} file(s)`);
         await loadNotes();
         await updateStats();
+      } else {
+        showToast("Failed to create note from dropped files");
       }
     } catch (err) {
       showToast("Failed to upload dropped files");
@@ -3021,6 +3455,15 @@ function setupEventListeners() {
     }
     if (batchColorPopover && !batchColorPopover.contains(e.target) && !batchColorBtn.contains(e.target)) {
       batchColorPopover.classList.remove("show");
+    }
+    if (modalWorkspacePopover && !modalWorkspacePopover.contains(e.target) && !modalWorkspaceBtn?.contains(e.target)) {
+      modalWorkspacePopover.classList.remove("show");
+    }
+    if (!e.target.closest(".card-more-popover") && !e.target.closest("button[title='More']")) {
+      document.querySelectorAll(".card-more-popover.show").forEach((el) => el.classList.remove("show"));
+    }
+    if (!e.target.closest(".color-popover") && !e.target.closest("button[title='Change color']")) {
+      document.querySelectorAll(".color-popover.show").forEach((el) => el.classList.remove("show"));
     }
     if (!e.target.closest(".card-ws-popover") && !e.target.closest("button[title='Move to workspace']")) {
       document.querySelectorAll(".card-ws-popover").forEach((el) => el.remove());
