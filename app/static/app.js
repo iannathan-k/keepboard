@@ -169,6 +169,7 @@ const storageInspectorBody = document.getElementById("storage-inspector-body");
 const selectionBar = document.getElementById("selection-bar");
 const selClearBtn = document.getElementById("sel-clear-btn");
 const selCountText = document.getElementById("sel-count-text");
+const selSelectAllBtn = document.getElementById("sel-select-all-btn");
 const batchPinBtn = document.getElementById("batch-pin-btn");
 const batchColorBtn = document.getElementById("batch-color-btn");
 const batchColorPopover = document.getElementById("batch-color-popover");
@@ -1488,24 +1489,38 @@ function toggleCardSelection(noteId, isShift = false) {
 function updateSelectionBar() {
   const count = selectedNoteIds.size;
   if (count > 0) {
-    mainHeader.style.display = "none";
-    selectionBar.classList.add("active");
-    selCountText.textContent = `${count} selected`;
+    if (mainHeader) mainHeader.style.display = "none";
+    if (selectionBar) {
+      selectionBar.classList.add("active");
+      selectionBar.style.display = "flex";
+    }
+    if (selCountText) selCountText.textContent = `${count} selected`;
 
     const isTrash = currentNavView === "trash";
     if (batchRestoreBtn) batchRestoreBtn.style.display = isTrash ? "inline-flex" : "none";
     if (batchTrashBtn) {
       batchTrashBtn.title = isTrash ? "Delete selected forever" : "Move selected to Trash";
     }
-    if (batchPinBtn) batchPinBtn.style.display = isTrash ? "none" : "inline-flex";
-    if (batchArchiveBtn) batchArchiveBtn.style.display = isTrash ? "none" : "inline-flex";
+    if (batchPinBtn) {
+      batchPinBtn.style.display = isTrash ? "none" : "inline-flex";
+      const allPinned = Array.from(selectedNoteIds).every((id) => allNotes.find((n) => n.id === id)?.is_pinned);
+      batchPinBtn.title = allPinned ? "Unpin selected" : "Pin selected";
+    }
+    if (batchArchiveBtn) {
+      batchArchiveBtn.style.display = isTrash ? "none" : "inline-flex";
+      batchArchiveBtn.title = currentNavView === "archive" ? "Unarchive selected" : "Archive selected";
+    }
     if (batchColorBtn) batchColorBtn.style.display = isTrash ? "none" : "inline-flex";
     if (batchMergeBtn) batchMergeBtn.style.display = isTrash ? "none" : "inline-flex";
     if (batchWorkspaceBtn) batchWorkspaceBtn.style.display = isTrash ? "none" : "inline-flex";
     if (batchTagBtn) batchTagBtn.style.display = isTrash ? "none" : "inline-flex";
+    if (batchDownloadBtn) batchDownloadBtn.style.display = isTrash ? "none" : "inline-flex";
   } else {
-    selectionBar.classList.remove("active");
-    mainHeader.style.display = "flex";
+    if (selectionBar) {
+      selectionBar.classList.remove("active");
+      selectionBar.style.display = "none";
+    }
+    if (mainHeader) mainHeader.style.display = "flex";
   }
 }
 
@@ -1513,6 +1528,18 @@ function clearSelection() {
   selectedNoteIds.clear();
   updateSelectionBar();
   renderNotesGrid();
+}
+
+function selectAllNotes() {
+  const visible = getFilteredNotes();
+  const allSelected = visible.length > 0 && visible.every((n) => selectedNoteIds.has(n.id));
+  if (allSelected) {
+    clearSelection();
+  } else {
+    visible.forEach((n) => selectedNoteIds.add(n.id));
+    updateSelectionBar();
+    renderNotesGrid();
+  }
 }
 
 async function executeBatchAction(action, payload = null) {
@@ -2621,7 +2648,7 @@ function showBatchMoveWorkspacePopover() {
         const res = await fetch("/api/notes/batch/move-workspace", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...vaultHeaders() },
-          body: JSON.stringify({ ids, workspace: ws.id }),
+          body: JSON.stringify({ note_ids: ids, ids, workspace: ws.id }),
         });
         if (res.ok) {
           showToast(`Moved ${ids.length} note(s) to ${ws.name}`);
@@ -3551,46 +3578,72 @@ function setupEventListeners() {
   setupSearchFlairs();
 
   // Multi-Select Batch Actions
-  selClearBtn.onclick = clearSelection;
-  batchPinBtn.onclick = () => executeBatchAction("pin");
-  batchArchiveBtn.onclick = () => executeBatchAction("archive");
-  batchMergeBtn.onclick = () => executeBatchAction("merge");
-  batchDownloadBtn.onclick = () => {
-    const ids = Array.from(selectedNoteIds);
-    window.location.href = `/api/notes/export?ids=${ids.join(",")}`;
-    clearSelection();
-  };
-  batchTrashBtn.onclick = () => {
-    if (currentNavView === "trash") {
-      if (confirm("Permanently delete selected notes? This cannot be undone.")) {
-        executeBatchAction("delete_forever");
+  if (selClearBtn) selClearBtn.onclick = clearSelection;
+  if (selSelectAllBtn) selSelectAllBtn.onclick = selectAllNotes;
+
+  if (batchPinBtn) {
+    batchPinBtn.onclick = () => {
+      const allPinned = Array.from(selectedNoteIds).every((id) => allNotes.find((n) => n.id === id)?.is_pinned);
+      executeBatchAction(allPinned ? "unpin" : "pin");
+    };
+  }
+
+  if (batchArchiveBtn) {
+    batchArchiveBtn.onclick = () => {
+      executeBatchAction(currentNavView === "archive" ? "unarchive" : "archive");
+    };
+  }
+
+  if (batchMergeBtn) batchMergeBtn.onclick = () => executeBatchAction("merge");
+
+  if (batchDownloadBtn) {
+    batchDownloadBtn.onclick = () => {
+      const ids = Array.from(selectedNoteIds);
+      window.location.href = `/api/notes/export?ids=${ids.join(",")}`;
+      clearSelection();
+    };
+  }
+
+  if (batchTrashBtn) {
+    batchTrashBtn.onclick = () => {
+      if (currentNavView === "trash") {
+        if (confirm("Permanently delete selected notes? This cannot be undone.")) {
+          executeBatchAction("delete_forever");
+        }
+      } else {
+        executeBatchAction("trash");
       }
-    } else {
-      executeBatchAction("trash");
-    }
-  };
+    };
+  }
+
   if (batchRestoreBtn) {
     batchRestoreBtn.onclick = () => executeBatchAction("restore");
   }
 
-  batchColorBtn.onclick = (e) => {
-    e.stopPropagation();
-    batchColorPopover.classList.toggle("show");
-  };
-  renderSwatches(batchColorPopover, (color) => executeBatchAction("color", color));
+  if (batchColorBtn) {
+    batchColorBtn.onclick = (e) => {
+      e.stopPropagation();
+      batchColorPopover.classList.toggle("show");
+    };
+    renderSwatches(batchColorPopover, (color) => executeBatchAction("color", color));
+  }
 
-  batchTagBtn.onclick = () => {
-    openTagPromptModal((tag) => executeBatchAction("tag", tag));
-  };
+  if (batchTagBtn) {
+    batchTagBtn.onclick = () => {
+      openTagPromptModal((tag) => executeBatchAction("tag", tag));
+    };
+  }
 
-  batchWorkspaceBtn.onclick = (e) => {
-    e.stopPropagation();
-    if (batchWorkspacePopover.style.display === "flex") {
-      batchWorkspacePopover.style.display = "none";
-    } else {
-      showBatchMoveWorkspacePopover();
-    }
-  };
+  if (batchWorkspaceBtn) {
+    batchWorkspaceBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (batchWorkspacePopover.style.display === "flex") {
+        batchWorkspacePopover.style.display = "none";
+      } else {
+        showBatchMoveWorkspacePopover();
+      }
+    };
+  }
 
   // Workspace Switcher (Sidebar)
   workspacePillBtn.onclick = (e) => {

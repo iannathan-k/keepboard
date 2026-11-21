@@ -669,7 +669,8 @@ class MoveWorkspaceRequest(BaseModel):
 
 
 class BatchMoveWorkspaceRequest(BaseModel):
-    note_ids: List[str]
+    note_ids: Optional[List[str]] = None
+    ids: Optional[List[str]] = None
     workspace: str
 
 
@@ -1504,20 +1505,22 @@ async def batch_action(
         if req.action == "pin":
             for n in matching:
                 n["pinned"] = True
+                n["is_pinned"] = True
                 n["updated_at"] = now
                 mirror_note_to_persist(n)
         elif req.action == "unpin":
             for n in matching:
                 n["pinned"] = False
+                n["is_pinned"] = False
                 n["updated_at"] = now
                 mirror_note_to_persist(n)
         elif req.action == "color":
             if isinstance(req.payload, dict):
-                new_color = req.payload.get("color", "#1b1c1f")
+                new_color = req.payload.get("color", "default")
             elif isinstance(req.payload, str):
                 new_color = req.payload
             else:
-                new_color = "#1b1c1f"
+                new_color = "default"
             for n in matching:
                 n["color"] = new_color
                 n["updated_at"] = now
@@ -1525,12 +1528,15 @@ async def batch_action(
         elif req.action == "archive":
             for n in matching:
                 n["archived"] = True
+                n["is_archived"] = True
                 n["pinned"] = False
+                n["is_pinned"] = False
                 n["updated_at"] = now
                 mirror_note_to_persist(n)
         elif req.action == "unarchive":
             for n in matching:
                 n["archived"] = False
+                n["is_archived"] = False
                 n["updated_at"] = now
                 mirror_note_to_persist(n)
         elif req.action == "trash":
@@ -2431,7 +2437,8 @@ async def batch_move_workspace(payload: BatchMoveWorkspaceRequest):
     target_ws = (payload.workspace or "").strip()
     if not target_ws:
         raise HTTPException(status_code=400, detail="Target workspace required.")
-    ids_set = set(payload.note_ids)
+    raw_ids = payload.note_ids or payload.ids or []
+    ids_set = set(raw_ids)
     async with notes_lock:
         notes = read_notes_sync()
         count = 0

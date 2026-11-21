@@ -336,39 +336,134 @@ header {
 
 /* ── Selection Action Bar (Overrides Header during multi-select) ─────────── */
 #selection-bar {
+  display: none;
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  height: var(--header-height);
-  background: #1e2229;
-  border-bottom: 1px solid rgba(138, 180, 248, 0.3);
-  display: none;
+  height: 64px;
+  background: #1E2023;
+  border-bottom: 1px solid rgba(250, 204, 21, 0.35);
+  padding: 0 24px;
   align-items: center;
   justify-content: space-between;
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+#selection-bar.active {
+  display: flex !important;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 64px;
+  z-index: 1000;
+  opacity: 1;
+  transform: none;
+  background: #1E2023;
+  border-bottom: 1px solid rgba(250, 204, 21, 0.35);
   padding: 0 24px;
-  z-index: 210;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-  animation: slideDown 0.18s var(--ease);
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
 }
-@keyframes slideDown {
-  from { transform: translateY(-100%); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
+
 .sel-left {
   display: flex;
   align-items: center;
   gap: 16px;
 }
+
+#selection-bar #sel-clear-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font-size: 15px;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+#selection-bar #sel-clear-btn:hover {
+  background: var(--surface-hover);
+  color: #fff;
+}
+
 .sel-count {
   font-size: 15px;
-  font-weight: 500;
-  color: var(--text);
+  font-weight: 600;
+  color: #FACC15;
+  user-select: none;
 }
+
+.sel-select-all-btn {
+  background: rgba(250, 204, 21, 0.12);
+  border: 1px solid rgba(250, 204, 21, 0.3);
+  color: #FACC15;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.sel-select-all-btn:hover {
+  background: rgba(250, 204, 21, 0.22);
+  border-color: #FACC15;
+  color: #fff;
+}
+
 .sel-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+.sel-actions .btn-icon {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-radius: 50%;
+  color: var(--text-sub);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.sel-actions .btn-icon svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+.sel-actions .btn-icon:hover {
+  background: var(--surface-hover);
+  color: #fff;
+}
+.sel-actions #batch-trash-btn:hover {
+  background: rgba(242, 139, 130, 0.18) !important;
+  color: #f28b82 !important;
+}
+.sel-actions #batch-trash-btn:hover svg {
+  fill: #f28b82 !important;
+}
+
+#selection-bar .color-popover {
+  top: 48px;
+  bottom: auto;
+  right: 0;
+  left: auto;
+  z-index: 1001;
+}
+#selection-bar .workspace-popover {
+  top: 48px;
+  bottom: auto;
+  right: 0;
+  left: auto;
+  z-index: 1001;
 }
 
 /* ── Sidebar Navigation ─────────────────────────────────────────────────── */
