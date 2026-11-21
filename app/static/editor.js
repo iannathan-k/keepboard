@@ -37,6 +37,7 @@ export function formatInlineCode() {
 
 // Clean paste interceptor to strip external website junk styling
 export function setupCleanPaste(editorEl) {
+  if (!editorEl) return;
   editorEl.addEventListener("paste", (e) => {
     e.preventDefault();
     const html = e.clipboardData.getData("text/html");
@@ -78,6 +79,7 @@ export function safeEvalMath(expr) {
 }
 
 export function setupInlineMath(editorEl) {
+  if (!editorEl) return;
   editorEl.addEventListener("keyup", (e) => {
     if (e.key === "=") {
       const sel = window.getSelection();
@@ -101,6 +103,7 @@ export function setupInlineMath(editorEl) {
 
 // Document Outline Extractor: extracts H1, H2, H3 with smooth scroll
 export function extractDocumentOutline(editorEl, outlineContainer) {
+  if (!editorEl || !outlineContainer) return;
   outlineContainer.innerHTML = "";
   const headings = editorEl.querySelectorAll("h1, h2, h3");
 
@@ -158,6 +161,7 @@ export function convertChecklistToText(items) {
 }
 
 export function renderChecklistEditor(container, items, onChange) {
+  if (!container) return;
   container.innerHTML = "";
   const wrapper = document.createElement("div");
   wrapper.style.display = "flex";

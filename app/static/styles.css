@@ -1055,7 +1055,14 @@ main.sidebar-collapsed {
   border-color: var(--accent) !important;
   box-shadow: 0 0 0 1px var(--accent);
 }
-.card.drop-target {
+.card.drop-target,
+.card.drag-over,
+.split-pane.drop-target,
+.split-pane.drag-over,
+.modal-card.drop-target,
+.modal-card.drag-over,
+.drop-target,
+.drag-over {
   border: 2px dashed var(--accent) !important;
   background: rgba(138, 180, 248, 0.22) !important;
   box-shadow: 0 0 0 3px var(--accent-muted), 0 8px 24px rgba(0, 0, 0, 0.45) !important;
@@ -1936,16 +1943,20 @@ main.sidebar-collapsed {
 #drop-overlay {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(19, 19, 20, 0.75);
-  backdrop-filter: blur(2px);
+  background: rgba(19, 19, 20, 0.85);
+  backdrop-filter: blur(4px);
   border: 3px dashed var(--accent);
-  z-index: 1000;
+  z-index: 10000;
   display: none;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   color: var(--accent);
   pointer-events: none;
+}
+#drop-overlay.active,
+#drop-overlay.show {
+  display: flex !important;
 }
 #drop-overlay svg { width: 72px; height: 72px; fill: currentColor; margin-bottom: 16px; }
 

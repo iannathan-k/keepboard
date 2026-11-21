@@ -21,19 +21,25 @@ import {
 import {
   formatDateTimeStamp,
   setupGlobalPaste,
+  setupGlobalDragDrop,
   setupCardDropzone,
   VoiceMemoRecorder,
   createQRCodeSVG,
+  initMedia,
 } from "./media.js";
 
 // Prevent default browser file-drop behavior (navigation/preview) globally immediately on module load
 if (typeof window !== "undefined") {
-  window.addEventListener("dragover", (e) => {
-    e.preventDefault();
-  }, false);
-  window.addEventListener("drop", (e) => {
-    e.preventDefault();
-  }, false);
+  const preventNav = (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+      if (e.type === "dragover") e.dataTransfer.dropEffect = "copy";
+    }
+  };
+  window.addEventListener("dragover", preventNav, false);
+  document.addEventListener("dragover", preventNav, false);
+  window.addEventListener("drop", preventNav, false);
+  document.addEventListener("drop", preventNav, false);
 }
 
 // ── Constants & Color Palettes ─────────────────────────────────────────────
@@ -221,6 +227,7 @@ const modalVoiceTimer = document.getElementById("modal-voice-timer");
 const modalVoiceCancelBtn = document.getElementById("modal-voice-cancel-btn");
 const modalVoiceDoneBtn = document.getElementById("modal-voice-done-btn");
 const modalShieldBtn = document.getElementById("modal-shield-btn");
+const modalVaultBtn = document.getElementById("modal-vault-btn");
 const modalTagBtn = document.getElementById("modal-tag-btn");
 const modalWorkspaceBtn = document.getElementById("modal-workspace-btn");
 const modalWorkspacePopover = document.getElementById("modal-workspace-popover");
@@ -1181,11 +1188,11 @@ function createCardElement(note) {
   // Lock in Vault
   const vaultItem = document.createElement("button");
   vaultItem.className = "card-more-item";
-  vaultItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg><span>Lock in vault</span>`;
+  vaultItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg><span>${note.is_vault ? "Unlock from vault" : "Lock in vault"}</span>`;
   vaultItem.onclick = (e) => {
     e.stopPropagation();
     morePopover.classList.remove("show");
-    lockNoteInVault(note.id);
+    toggleNoteVault(note.id);
   };
   morePopover.appendChild(vaultItem);
 
@@ -1545,6 +1552,20 @@ async function openEditModal(noteId) {
     modalShieldBtn.classList.toggle("active", Boolean(note.saved_to_disk));
     modalShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
   }
+  if (modalVaultBtn) {
+    modalVaultBtn.classList.toggle("active", Boolean(note.is_vault));
+    modalVaultBtn.title = note.is_vault ? "Unlock from Vault" : "Lock in Vault (Protected)";
+  }
+
+  // Wire dropzone on modal editor card
+  setupCardDropzone(editModalCard, () => currentEditingNoteId, {
+    onAttachmentsUploaded: (updated) => {
+      const refreshed = allNotes.find((n) => n.id === currentEditingNoteId) || updated;
+      if (refreshed) renderModalAttachments(refreshed.attachments || []);
+    },
+    showToast,
+    vaultHeaders,
+  });
 
   renderModalTags();
   renderModalAttachments(note.attachments || []);
@@ -1717,6 +1738,16 @@ function renderSplitWorkspace() {
     pane.className = "split-pane";
     pane.dataset.noteId = note.id;
     pane.style.backgroundColor = paletteFor(note.color);
+
+    // Wire dropzone on split pane
+    setupCardDropzone(pane, note.id, {
+      onAttachmentsUploaded: () => {
+        loadNotes(false);
+        renderSplitWorkspace();
+      },
+      showToast,
+      vaultHeaders,
+    });
 
     // Header
     const header = document.createElement("div");
@@ -2007,6 +2038,18 @@ function renderSplitWorkspace() {
     };
     footer.appendChild(splitShieldBtn);
 
+    // 5b. Vault (Lock in Vault)
+    const splitVaultBtn = document.createElement("button");
+    splitVaultBtn.className = `btn-icon ${note.is_vault ? "active" : ""}`;
+    splitVaultBtn.title = note.is_vault ? "Unlock from Vault" : "Lock in Vault (Protected)";
+    splitVaultBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>`;
+    splitVaultBtn.onclick = async (e) => {
+      e.stopPropagation();
+      await toggleNoteVault(note.id);
+      renderSplitWorkspace();
+    };
+    footer.appendChild(splitVaultBtn);
+
     // 6. Labels (#)
     const splitTagBtn = document.createElement("button");
     splitTagBtn.className = "btn-icon";
@@ -2286,15 +2329,17 @@ async function duplicateNote(noteId) {
   }
 }
 
-async function lockNoteInVault(noteId) {
+async function toggleNoteVault(noteId) {
+  const note = allNotes.find((n) => n.id === noteId);
+  const targetVaultState = note ? !note.is_vault : true;
   if (!vaultConfigured) {
     showToast("Configure Vault password first");
-    promptVaultPassword(true);
+    promptVaultPassword(true, () => toggleNoteVault(noteId));
     return;
   }
   if (!vaultUnlocked || !vaultToken) {
-    showToast("Unlock Vault first to protect notes");
-    promptVaultPassword(false);
+    showToast("Enter Vault master password to unlock");
+    promptVaultPassword(false, () => toggleNoteVault(noteId));
     return;
   }
   try {
@@ -2304,17 +2349,29 @@ async function lockNoteInVault(noteId) {
         "Content-Type": "application/json",
         ...vaultHeaders(),
       },
-      body: JSON.stringify({ is_vault: true }),
+      body: JSON.stringify({ is_vault: targetVaultState }),
     });
     if (res.ok) {
-      showToast("Note moved to Vault (Protected)");
-      await loadNotes();
+      if (note) note.is_vault = targetVaultState;
+      showToast(targetVaultState ? "Note locked in Vault (Protected)" : "Note unlocked from Vault");
+      if (modalVaultBtn && currentEditingNoteId === noteId) {
+        modalVaultBtn.classList.toggle("active", targetVaultState);
+        modalVaultBtn.title = targetVaultState ? "Unlock from Vault" : "Lock in Vault (Protected)";
+      }
+      await loadNotes(false);
+      if (openPanes.includes(noteId)) {
+        renderSplitWorkspace();
+      }
     } else {
-      showToast("Failed to move note to Vault");
+      showToast("Failed to update Vault status");
     }
   } catch (err) {
-    showToast("Error protecting note in Vault");
+    showToast("Error updating Vault status");
   }
+}
+
+async function lockNoteInVault(noteId) {
+  return toggleNoteVault(noteId);
 }
 
 function showMoveWorkspacePopover(noteId, anchorEl) {
@@ -2800,7 +2857,7 @@ function updateVaultUI() {
   }
 }
 
-function promptVaultPassword(isSetup = false) {
+function promptVaultPassword(isSetup = false, onSuccess = null) {
   vaultModalTitle.textContent = isSetup ? "Set Vault Master Password" : "Unlock Vault";
   vaultModalDesc.textContent = isSetup
     ? "Create a master password using PBKDF2-SHA256 to protect your secret notes:"
@@ -2810,6 +2867,13 @@ function promptVaultPassword(isSetup = false) {
   vaultModalSubmitBtn.textContent = isSetup ? "Set Password" : "Unlock";
   vaultModalBackdrop.style.display = "flex";
   vaultModalPassword.focus();
+
+  vaultModalPassword.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      vaultModalSubmitBtn.click();
+    }
+  };
 
   vaultModalSubmitBtn.onclick = async () => {
     const pw = vaultModalPassword.value;
@@ -2825,7 +2889,7 @@ function promptVaultPassword(isSetup = false) {
         showToast("Vault password configured");
         vaultConfigured = true;
         vaultModalBackdrop.style.display = "none";
-        promptVaultPassword(false);
+        promptVaultPassword(false, onSuccess);
       } else {
         vaultModalError.textContent = "Failed to set password";
         vaultModalError.style.display = "block";
@@ -2845,6 +2909,9 @@ function promptVaultPassword(isSetup = false) {
         showToast("Vault unlocked");
         updateVaultUI();
         await loadNotes();
+        if (typeof onSuccess === "function") {
+          onSuccess();
+        }
       } else {
         vaultModalError.textContent = "Incorrect master password";
         vaultModalError.style.display = "block";
@@ -2857,14 +2924,22 @@ function promptVaultPassword(isSetup = false) {
 function setupEventListeners() {
   // Navigation
   [navNotes, navArchive, navTrash, navVault].forEach((btn) => {
+    if (!btn) return;
     btn.onclick = () => {
-      [navNotes, navArchive, navTrash, navVault].forEach((b) => b.classList.remove("active"));
+      [navNotes, navArchive, navTrash, navVault].forEach((b) => b?.classList.remove("active"));
       btn.classList.add("active");
 
       if (btn === navNotes) currentNavView = "notes";
       else if (btn === navArchive) currentNavView = "archive";
       else if (btn === navTrash) currentNavView = "trash";
-      else if (btn === navVault) currentNavView = "vault";
+      else if (btn === navVault) {
+        currentNavView = "vault";
+        if (!vaultConfigured) {
+          promptVaultPassword(true);
+        } else if (!vaultUnlocked) {
+          promptVaultPassword(false);
+        }
+      }
 
       trashBanner.style.display = currentNavView === "trash" ? "flex" : "none";
       updateVaultUI();
@@ -2978,67 +3053,81 @@ function setupEventListeners() {
     modalFmtToolbar.classList.toggle("show");
   };
 
+  // WYSIWYG Formatting Buttons Helper
+  const bindClick = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.onclick = fn;
+  };
+  const bindChange = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.onchange = fn;
+  };
+
   // WYSIWYG Formatting Buttons (Composer)
-  document.getElementById("fmt-c-bold").onclick = () => formatDoc("bold");
-  document.getElementById("fmt-c-italic").onclick = () => formatDoc("italic");
-  document.getElementById("fmt-c-underline").onclick = () => formatDoc("underline");
-  document.getElementById("fmt-c-strike").onclick = () => formatDoc("strikeThrough");
-  document.getElementById("fmt-c-hl-yellow").onclick = () => formatHighlight("#524816");
-  document.getElementById("fmt-c-hl-cyan").onclick = () => formatHighlight("#16424d");
-  document.getElementById("fmt-c-hl-pink").onclick = () => formatHighlight("#4d1637");
-  document.getElementById("fmt-c-hl-green").onclick = () => formatHighlight("#1a4225");
-  document.getElementById("fmt-c-hl-orange").onclick = () => formatHighlight("#4d2c16");
-  document.getElementById("fmt-c-ul").onclick = () => formatDoc("insertUnorderedList");
-  document.getElementById("fmt-c-ol").onclick = () => formatDoc("insertOrderedList");
-  document.getElementById("fmt-c-code").onclick = () => formatInlineCode();
-  document.getElementById("fmt-c-heading").onchange = (e) => applyTextStyle(e.target.value);
+  bindClick("fmt-c-bold", () => formatDoc("bold"));
+  bindClick("fmt-c-italic", () => formatDoc("italic"));
+  bindClick("fmt-c-underline", () => formatDoc("underline"));
+  bindClick("fmt-c-strike", () => formatDoc("strikeThrough"));
+  bindClick("fmt-c-hl-yellow", () => formatHighlight("#524816"));
+  bindClick("fmt-c-hl-cyan", () => formatHighlight("#16424d"));
+  bindClick("fmt-c-hl-pink", () => formatHighlight("#4d1637"));
+  bindClick("fmt-c-hl-green", () => formatHighlight("#1a4225"));
+  bindClick("fmt-c-hl-orange", () => formatHighlight("#4d2c16"));
+  bindClick("fmt-c-ul", () => formatDoc("insertUnorderedList"));
+  bindClick("fmt-c-ol", () => formatDoc("insertOrderedList"));
+  bindClick("fmt-c-code", () => formatInlineCode());
+  bindChange("fmt-c-heading", (e) => applyTextStyle(e.target.value));
 
   // WYSIWYG Formatting Buttons (Modal)
-  document.getElementById("fmt-m-bold").onclick = () => formatDoc("bold");
-  document.getElementById("fmt-m-italic").onclick = () => formatDoc("italic");
-  document.getElementById("fmt-m-underline").onclick = () => formatDoc("underline");
-  document.getElementById("fmt-m-strike").onclick = () => formatDoc("strikeThrough");
-  document.getElementById("fmt-m-hl-yellow").onclick = () => formatHighlight("#524816");
-  document.getElementById("fmt-m-hl-cyan").onclick = () => formatHighlight("#16424d");
-  document.getElementById("fmt-m-hl-pink").onclick = () => formatHighlight("#4d1637");
-  document.getElementById("fmt-m-hl-green").onclick = () => formatHighlight("#1a4225");
-  document.getElementById("fmt-m-hl-orange").onclick = () => formatHighlight("#4d2c16");
-  document.getElementById("fmt-m-ul").onclick = () => formatDoc("insertUnorderedList");
-  document.getElementById("fmt-m-ol").onclick = () => formatDoc("insertOrderedList");
-  document.getElementById("fmt-m-code").onclick = () => formatInlineCode();
-  document.getElementById("fmt-m-heading").onchange = (e) => applyTextStyle(e.target.value);
+  bindClick("fmt-m-bold", () => formatDoc("bold"));
+  bindClick("fmt-m-italic", () => formatDoc("italic"));
+  bindClick("fmt-m-underline", () => formatDoc("underline"));
+  bindClick("fmt-m-strike", () => formatDoc("strikeThrough"));
+  bindClick("fmt-m-hl-yellow", () => formatHighlight("#524816"));
+  bindClick("fmt-m-hl-cyan", () => formatHighlight("#16424d"));
+  bindClick("fmt-m-hl-pink", () => formatHighlight("#4d1637"));
+  bindClick("fmt-m-hl-green", () => formatHighlight("#1a4225"));
+  bindClick("fmt-m-hl-orange", () => formatHighlight("#4d2c16"));
+  bindClick("fmt-m-ul", () => formatDoc("insertUnorderedList"));
+  bindClick("fmt-m-ol", () => formatDoc("insertOrderedList"));
+  bindClick("fmt-m-code", () => formatInlineCode());
+  bindChange("fmt-m-heading", (e) => applyTextStyle(e.target.value));
 
   // Raw Markdown Toggle (Composer)
-  composerRawToggleBtn.onclick = () => {
-    composerRawMode = !composerRawMode;
-    if (composerRawMode) {
-      composerRawTextarea.value = composerRichEditor.innerHTML;
-      composerRichEditor.style.display = "none";
-      composerRawTextarea.style.display = "block";
-      composerRawToggleBtn.classList.add("active");
-    } else {
-      composerRichEditor.innerHTML = composerRawTextarea.value;
-      composerRawTextarea.style.display = "none";
-      composerRichEditor.style.display = "block";
-      composerRawToggleBtn.classList.remove("active");
-    }
-  };
+  if (composerRawToggleBtn) {
+    composerRawToggleBtn.onclick = () => {
+      composerRawMode = !composerRawMode;
+      if (composerRawMode) {
+        composerRawTextarea.value = composerRichEditor.innerHTML;
+        composerRichEditor.style.display = "none";
+        composerRawTextarea.style.display = "block";
+        composerRawToggleBtn.classList.add("active");
+      } else {
+        composerRichEditor.innerHTML = composerRawTextarea.value;
+        composerRawTextarea.style.display = "none";
+        composerRichEditor.style.display = "block";
+        composerRawToggleBtn.classList.remove("active");
+      }
+    };
+  }
 
   // Raw Markdown Toggle (Modal)
-  modalRawToggleBtn.onclick = () => {
-    modalRawMode = !modalRawMode;
-    if (modalRawMode) {
-      modalRawTextarea.value = modalRichEditor.innerHTML;
-      modalRichEditor.style.display = "none";
-      modalRawTextarea.style.display = "block";
-      modalRawToggleBtn.classList.add("active");
-    } else {
-      modalRichEditor.innerHTML = modalRawTextarea.value;
-      modalRawTextarea.style.display = "none";
-      modalRichEditor.style.display = "block";
-      modalRawToggleBtn.classList.remove("active");
-    }
-  };
+  if (modalRawToggleBtn) {
+    modalRawToggleBtn.onclick = () => {
+      modalRawMode = !modalRawMode;
+      if (modalRawMode) {
+        modalRawTextarea.value = modalRichEditor.innerHTML;
+        modalRichEditor.style.display = "none";
+        modalRawTextarea.style.display = "block";
+        modalRawToggleBtn.classList.add("active");
+      } else {
+        modalRichEditor.innerHTML = modalRawTextarea.value;
+        modalRawTextarea.style.display = "none";
+        modalRichEditor.style.display = "block";
+        modalRawToggleBtn.classList.remove("active");
+      }
+    };
+  }
 
   // Color Pickers
   renderSwatches(composerColorPopover, (color) => {
@@ -3266,23 +3355,37 @@ function setupEventListeners() {
     });
   };
 
-  modalPinBtn.onclick = () => {
-    modalIsPinned = !modalIsPinned;
-    modalPinBtn.style.color = modalIsPinned ? "var(--accent)" : "inherit";
-  };
+  if (modalPinBtn) {
+    modalPinBtn.onclick = () => {
+      modalIsPinned = !modalIsPinned;
+      modalPinBtn.style.color = modalIsPinned ? "var(--accent)" : "inherit";
+    };
+  }
 
-  modalOutlineToggleBtn.onclick = () => {
-    modalOutlineRail.classList.toggle("collapsed");
-  };
+  if (modalOutlineToggleBtn) {
+    modalOutlineToggleBtn.onclick = () => {
+      if (modalOutlineRail) modalOutlineRail.classList.toggle("collapsed");
+    };
+  }
 
-  modalSplitBtn.onclick = () => {
-    if (currentEditingNoteId) toggleSplitPane(currentEditingNoteId);
-  };
+  if (modalSplitBtn) {
+    modalSplitBtn.onclick = () => {
+      if (currentEditingNoteId) toggleSplitPane(currentEditingNoteId);
+    };
+  }
 
-  modalQrBtn.onclick = () => {
-    const note = allNotes.find((n) => n.id === currentEditingNoteId);
-    if (note) showQRCode(note);
-  };
+  if (modalVaultBtn) {
+    modalVaultBtn.onclick = () => {
+      if (currentEditingNoteId) toggleNoteVault(currentEditingNoteId);
+    };
+  }
+
+  if (modalQrBtn) {
+    modalQrBtn.onclick = () => {
+      const note = allNotes.find((n) => n.id === currentEditingNoteId);
+      if (note) showQRCode(note);
+    };
+  }
 
   modalDuplicateBtn.onclick = async () => {
     if (!currentEditingNoteId) return;
@@ -3371,66 +3474,45 @@ function setupEventListeners() {
   emptyTrashBtn.onclick = emptyTrash;
 
   // Full-Window Drag and Drop Anywhere
-  window.addEventListener("dragenter", (e) => {
-    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
-      if (!e.target.closest || !e.target.closest(".card")) {
-        dropOverlay.style.display = "flex";
+  setupGlobalDragDrop({
+    onGlobalDrop: async (files) => {
+      if (!files || files.length === 0) return;
+
+      // If composer is open, add to composer attachments
+      if (captureExpanded && captureExpanded.style.display === "flex") {
+        files.forEach((f) => composerPendingFiles.push(f));
+        renderComposerPendingFiles();
+        showToast(`${files.length} file(s) attached to draft`);
+        return;
       }
-    }
-  });
 
-  window.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    if (e.dataTransfer) {
-      e.dataTransfer.dropEffect = "copy";
-    }
-  });
+      // Otherwise, create a new note immediately with these files
+      const formData = new FormData();
+      formData.append("title", files.length === 1 ? files[0].name : `Dropped Files (${files.length})`);
+      formData.append("color", "default");
+      formData.append("workspace", currentWorkspaceId || "default");
+      files.forEach((f) => formData.append("files", f));
 
-  window.addEventListener("dragleave", (e) => {
-    if (!e.relatedTarget || e.clientY <= 0 || e.clientX <= 0 || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
-      dropOverlay.style.display = "none";
-    }
-  });
-
-  window.addEventListener("drop", async (e) => {
-    e.preventDefault();
-    dropOverlay.style.display = "none";
-    document.querySelectorAll(".card.drop-target").forEach((c) => c.classList.remove("drop-target"));
-
-    const files = Array.from(e.dataTransfer?.files || []);
-    if (files.length === 0) return;
-
-    // If composer is open, add to composer attachments
-    if (captureExpanded && captureExpanded.style.display === "flex") {
-      files.forEach((f) => composerPendingFiles.push(f));
-      renderComposerPendingFiles();
-      showToast(`${files.length} file(s) attached to draft`);
-      return;
-    }
-
-    // Otherwise, create a new note immediately with these files
-    const formData = new FormData();
-    formData.append("title", files.length === 1 ? files[0].name : `Dropped Files (${files.length})`);
-    formData.append("color", "default");
-    formData.append("workspace", currentWorkspaceId || "default");
-    files.forEach((f) => formData.append("files", f));
-
-    try {
-      const res = await fetch("/api/notes", {
-        method: "POST",
-        headers: vaultHeaders(),
-        body: formData,
-      });
-      if (res.ok) {
-        showToast(`Created note with ${files.length} file(s)`);
-        await loadNotes();
-        await updateStats();
-      } else {
-        showToast("Failed to create note from dropped files");
+      try {
+        const res = await fetch("/api/notes", {
+          method: "POST",
+          headers: vaultHeaders(),
+          body: formData,
+        });
+        if (res.ok) {
+          showToast(`Created note with ${files.length} file(s)`);
+          await loadNotes();
+          await updateStats();
+        } else {
+          showToast("Failed to create note from dropped files");
+        }
+      } catch (err) {
+        showToast("Failed to upload dropped files");
       }
-    } catch (err) {
-      showToast("Failed to upload dropped files");
-    }
+    },
+    showToast,
+    vaultHeaders,
+    getWorkspace: () => currentWorkspaceId || "default",
   });
 
   // Global Clipboard Capture (⌘V / Ctrl+V)
@@ -3580,13 +3662,13 @@ function openTagPromptModal(cb) {
 
 // ── Application Initialization ─────────────────────────────────────────────
 async function initApp() {
-  applyGridDensity(gridDensity);
-  setupEventListeners();
-  initLiveSync();
-  await loadWorkspaces();
-  await checkVaultStatus();
-  await loadNotes();
-  await updateStats();
+  try { applyGridDensity(gridDensity); } catch (e) { console.error("Density err:", e); }
+  try { setupEventListeners(); } catch (e) { console.error("Listeners err:", e); }
+  try { initLiveSync(); } catch (e) { console.error("Sync err:", e); }
+  try { await loadWorkspaces(); } catch (e) { console.error("Workspaces err:", e); }
+  try { await checkVaultStatus(); } catch (e) { console.error("Vault err:", e); }
+  try { await loadNotes(); } catch (e) { console.error("Notes err:", e); }
+  try { await updateStats(); } catch (e) { console.error("Stats err:", e); }
 }
 
 document.addEventListener("DOMContentLoaded", initApp);

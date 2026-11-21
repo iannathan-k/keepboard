@@ -1,14 +1,33 @@
 // ── KeepBoard v3: media.js ──────────────────────────────────────────────────
 // Global clipboard capture, per-card dropzones, voice recorder, QR generator
 
-// Register global window dragover & drop preventDefault immediately on module load
-// so dropping a file anywhere on the page never navigates away or opens browser previewer.
+// Register global window & document dragover & drop preventDefault immediately on module load
+// so dropping or dragging a file anywhere on the page never navigates away or opens browser previewer.
 if (typeof window !== "undefined") {
-  window.addEventListener("dragover", (e) => {
-    e.preventDefault();
-  }, false);
+  const preventNav = (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+      if (e.type === "dragover") {
+        e.dataTransfer.dropEffect = "copy";
+      }
+    }
+  };
+
+  window.addEventListener("dragover", preventNav, false);
+  document.addEventListener("dragover", preventNav, false);
+  window.addEventListener("dragenter", preventNav, false);
+  document.addEventListener("dragenter", preventNav, false);
+  window.addEventListener("dragleave", preventNav, false);
+  document.addEventListener("dragleave", preventNav, false);
   window.addEventListener("drop", (e) => {
-    e.preventDefault();
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+    }
+  }, false);
+  document.addEventListener("drop", (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+    }
   }, false);
 }
 
@@ -108,15 +127,22 @@ export function setupGlobalPaste({ onNoteCreated, showToast, vaultHeaders, getWo
   });
 }
 
-// ── Per-Card File Dropzone ──────────────────────────────────────────────────
-export function setupCardDropzone(cardEl, noteId, { onAttachmentsUploaded, showToast, vaultHeaders }) {
+// ── Per-Card & Editor File Dropzone ─────────────────────────────────────────
+export function setupCardDropzone(cardEl, noteIdOrGetter, { onAttachmentsUploaded, showToast, vaultHeaders } = {}) {
+  if (!cardEl) return;
+
+  const getTargetNoteId = () => typeof noteIdOrGetter === "function" ? noteIdOrGetter() : noteIdOrGetter;
+
   cardEl.addEventListener("dragenter", (e) => {
     if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
       e.preventDefault();
       e.stopPropagation();
-      cardEl.classList.add("drop-target");
+      cardEl.classList.add("drop-target", "drag-over");
       const overlay = document.getElementById("drop-overlay");
-      if (overlay) overlay.style.display = "none";
+      if (overlay) {
+        overlay.classList.remove("active");
+        overlay.style.display = "none";
+      }
     }
   });
 
@@ -125,24 +151,33 @@ export function setupCardDropzone(cardEl, noteId, { onAttachmentsUploaded, showT
       e.preventDefault();
       e.stopPropagation();
       e.dataTransfer.dropEffect = "copy";
-      cardEl.classList.add("drop-target");
+      cardEl.classList.add("drop-target", "drag-over");
       const overlay = document.getElementById("drop-overlay");
-      if (overlay) overlay.style.display = "none";
+      if (overlay) {
+        overlay.classList.remove("active");
+        overlay.style.display = "none";
+      }
     }
   });
 
   cardEl.addEventListener("dragleave", (e) => {
     if (!cardEl.contains(e.relatedTarget)) {
-      cardEl.classList.remove("drop-target");
+      cardEl.classList.remove("drop-target", "drag-over");
     }
   });
 
   cardEl.addEventListener("drop", async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    cardEl.classList.remove("drop-target");
+    cardEl.classList.remove("drop-target", "drag-over");
     const overlay = document.getElementById("drop-overlay");
-    if (overlay) overlay.style.display = "none";
+    if (overlay) {
+      overlay.classList.remove("active");
+      overlay.style.display = "none";
+    }
+
+    const targetNoteId = getTargetNoteId();
+    if (!targetNoteId) return;
 
     const files = Array.from(e.dataTransfer?.files || []);
     if (files.length === 0) return;
@@ -151,7 +186,7 @@ export function setupCardDropzone(cardEl, noteId, { onAttachmentsUploaded, showT
     files.forEach((f) => fd.append("files", f));
 
     try {
-      const res = await fetch(`/api/notes/${noteId}/attachments`, {
+      const res = await fetch(`/api/notes/${targetNoteId}/attachments`, {
         method: "POST",
         headers: typeof vaultHeaders === "function" ? vaultHeaders() : {},
         body: fd,
@@ -161,14 +196,86 @@ export function setupCardDropzone(cardEl, noteId, { onAttachmentsUploaded, showT
         if (typeof onAttachmentsUploaded === "function") {
           onAttachmentsUploaded(updated);
         }
-        showToast(`Added ${files.length} attachment(s) to card`);
+        if (showToast) showToast(`Added ${files.length} attachment(s) to note`);
       } else {
-        showToast("Failed to upload attachments to card");
+        if (showToast) showToast("Failed to upload attachments to note");
       }
     } catch (err) {
-      showToast("Upload error: " + err.message);
+      if (showToast) showToast("Upload error: " + err.message);
     }
   });
+}
+
+// ── Global Drag and Drop Anywhere on Window ──────────────────────────────────
+export function setupGlobalDragDrop({ onGlobalDrop, showToast, vaultHeaders, getWorkspace } = {}) {
+  let dragCounter = 0;
+  const overlay = document.getElementById("drop-overlay");
+
+  window.addEventListener("dragenter", (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+      dragCounter++;
+      const isCardOrEditor = e.target && e.target.closest && e.target.closest(".card, .split-pane, .modal-card, #capture-box");
+      if (!isCardOrEditor && overlay) {
+        overlay.classList.add("active");
+        overlay.style.display = "flex";
+      } else if (overlay) {
+        overlay.classList.remove("active");
+        overlay.style.display = "none";
+      }
+    }
+  });
+
+  window.addEventListener("dragover", (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      const isCardOrEditor = e.target && e.target.closest && e.target.closest(".card, .split-pane, .modal-card, #capture-box");
+      if (isCardOrEditor && overlay) {
+        overlay.classList.remove("active");
+        overlay.style.display = "none";
+      }
+    }
+  });
+
+  window.addEventListener("dragleave", (e) => {
+    if (e.dataTransfer && e.dataTransfer.types && (e.dataTransfer.types.includes("Files") || Array.from(e.dataTransfer.types).includes("Files"))) {
+      e.preventDefault();
+      dragCounter--;
+      if (dragCounter <= 0 || !e.relatedTarget || e.clientY <= 0 || e.clientX <= 0 || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
+        dragCounter = 0;
+        if (overlay) {
+          overlay.classList.remove("active");
+          overlay.style.display = "none";
+        }
+      }
+    }
+  });
+
+  window.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    if (overlay) {
+      overlay.classList.remove("active");
+      overlay.style.display = "none";
+    }
+    document.querySelectorAll(".card.drop-target, .card.drag-over, .drop-target, .drag-over").forEach((c) => {
+      c.classList.remove("drop-target", "drag-over");
+    });
+
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length === 0) return;
+
+    if (typeof onGlobalDrop === "function") {
+      await onGlobalDrop(files);
+    }
+  });
+}
+
+// ── Unified Media Initialization ───────────────────────────────────────────
+export function initMedia(options = {}) {
+  setupGlobalPaste(options);
+  setupGlobalDragDrop(options);
 }
 
 // ── Inline Audio Voice Memo Recorder ─────────────────────────────────────────
