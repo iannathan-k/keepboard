@@ -159,6 +159,12 @@ const densityIcon = document.getElementById("density-icon");
 const headerCliBtn = document.getElementById("header-cli-btn");
 const ramPill = document.getElementById("ram-pill");
 const ramUsageText = document.getElementById("ram-usage-text");
+const sidebarRamPill = document.getElementById("sidebar-ram-pill");
+const sidebarRamText = document.getElementById("sidebar-ram-text");
+const sidebarRamFill = document.getElementById("sidebar-ram-fill");
+const storageInspectorBackdrop = document.getElementById("storage-inspector-backdrop");
+const storageInspectorCloseBtn = document.getElementById("storage-inspector-close-btn");
+const storageInspectorBody = document.getElementById("storage-inspector-body");
 
 const selectionBar = document.getElementById("selection-bar");
 const selClearBtn = document.getElementById("sel-clear-btn");
@@ -734,8 +740,9 @@ function getFilteredNotes() {
 function computeColumnCount(gridEl, count = 1) {
   if (gridDensity === "list") return 1;
   const containerWidth = gridEl.getBoundingClientRect().width || gridEl.parentElement?.clientWidth || 1000;
-  const colWidth = gridDensity === "compact" ? 210 : 250;
-  const maxCols = Math.max(1, Math.floor(containerWidth / colWidth));
+  const colWidth = gridDensity === "compact" ? 212 : 252;
+  const gap = gridDensity === "compact" ? 12 : 16;
+  const maxCols = Math.max(1, Math.floor((containerWidth + gap) / (colWidth + gap)));
   return Math.min(Math.max(1, count), maxCols);
 }
 
@@ -1228,7 +1235,7 @@ function createCardElement(note) {
     actionsBar.appendChild(restoreBtn);
 
     const delForeverBtn = document.createElement("button");
-    delForeverBtn.className = "btn-icon";
+    delForeverBtn.className = "btn-icon card-action-trash";
     delForeverBtn.title = "Delete forever";
     delForeverBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
     delForeverBtn.onclick = (e) => {
@@ -1237,6 +1244,7 @@ function createCardElement(note) {
     };
     actionsBar.appendChild(delForeverBtn);
   } else {
+    // 1. Color Palette
     actionsBar.appendChild(colorWrap);
 
     // 2. Archive / Unarchive
@@ -1261,7 +1269,18 @@ function createCardElement(note) {
     };
     actionsBar.appendChild(splitBtn);
 
-    // 4. More (⋮) Overflow Menu
+    // 4. Delete / Move to Trash
+    const trashBtn = document.createElement("button");
+    trashBtn.className = "btn-icon card-action-trash";
+    trashBtn.title = "Delete";
+    trashBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>`;
+    trashBtn.onclick = (e) => {
+      e.stopPropagation();
+      trashNote(note.id);
+    };
+    actionsBar.appendChild(trashBtn);
+
+    // 5. More (⋮) Overflow Menu
     const moreWrap = document.createElement("div");
     moreWrap.style.position = "relative";
     const moreBtn = document.createElement("button");
@@ -1342,22 +1361,6 @@ function createCardElement(note) {
       exportNoteMarkdown(note);
     };
     morePopover.appendChild(exportItem);
-
-    // Divider
-    const moreDivider = document.createElement("div");
-    moreDivider.className = "card-more-divider";
-    morePopover.appendChild(moreDivider);
-
-    // Delete
-    const delItem = document.createElement("button");
-    delItem.className = "card-more-item";
-    delItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg><span>Delete</span>`;
-    delItem.onclick = (e) => {
-      e.stopPropagation();
-      morePopover.classList.remove("show");
-      trashNote(note.id);
-    };
-    morePopover.appendChild(delItem);
 
     moreBtn.onclick = (e) => {
       e.stopPropagation();
@@ -2706,6 +2709,7 @@ function renderCommandPaletteList(query) {
     { label: "New Note", shortcut: "C", action: () => { expandComposer(); composerTitleInput.focus(); } },
     { label: "New Checklist", shortcut: "L", action: () => { expandComposer(); composerChecklistToggleBtn.click(); } },
     { label: "Cycle Grid Density", shortcut: "D", action: () => cycleGridDensity() },
+    { label: "Storage & Attachment Inspector", shortcut: "⌘I", action: () => openStorageInspector() },
     { label: "View: All Notes", shortcut: "G N", action: () => navNotes.click() },
     { label: "View: Archive", shortcut: "G A", action: () => navArchive.click() },
     { label: "View: Trash", shortcut: "G T", action: () => navTrash.click() },
@@ -2861,9 +2865,10 @@ async function updateStats() {
     if (res.ok) {
       const stats = await res.json();
       const ramUsed = Number(stats.ram_used ?? stats.used ?? stats.ram_bytes ?? 0);
-      const ramTotal = Number(stats.ram_total ?? stats.total ?? 0);
+      const ramTotal = Number(stats.ram_total ?? stats.total ?? 1024 * 1024 * 1024);
       const persistUsed = Number(stats.persist_used ?? stats.disk_used ?? stats.persist_bytes ?? 0);
       const persistTotal = Number(stats.persist_total ?? stats.disk_total ?? 0);
+      const ramPct = ramTotal > 0 ? Math.min(100, Math.max(0, (ramUsed / ramTotal) * 100)) : 0;
 
       if (ramUsageText) {
         ramUsageText.textContent = `${formatBytes(ramUsed)} RAM`;
@@ -2872,11 +2877,280 @@ async function updateStats() {
         const persistInfo = stats.persist_available
           ? `\nDisk (/persist): ${formatBytes(persistUsed)}${persistTotal ? ` / ${formatBytes(persistTotal)}` : ""}`
           : "\nDisk (/persist): Not mounted";
-        ramPill.title = `In RAM (/data tmpfs): ${formatBytes(ramUsed)}${ramTotal ? ` / ${formatBytes(ramTotal)}` : ""}${persistInfo}\nActive: ${stats.active_count || 0} | Trash: ${stats.trashed_count || 0}`;
+        ramPill.title = `In RAM (/data tmpfs): ${formatBytes(ramUsed)}${ramTotal ? ` / ${formatBytes(ramTotal)}` : ""}${persistInfo}\nActive: ${stats.active_count || 0} | Trash: ${stats.trashed_count || 0}\nClick to open Storage & Attachment Inspector`;
+      }
+
+      if (sidebarRamText) {
+        sidebarRamText.textContent = `In RAM: ${formatBytes(ramUsed)}`;
+      }
+      if (sidebarRamFill) {
+        sidebarRamFill.style.width = `${ramPct.toFixed(1)}%`;
+      }
+      if (sidebarRamPill) {
+        sidebarRamPill.title = `In RAM (/data tmpfs): ${formatBytes(ramUsed)} / ${formatBytes(ramTotal)} (${ramPct.toFixed(1)}%)\nClick to open Storage & Attachment Inspector`;
+      }
+
+      if (storageInspectorBackdrop && storageInspectorBackdrop.style.display === "flex") {
+        renderStorageInspector(stats);
       }
     }
   } catch (err) {
     // ignore
+  }
+}
+
+async function openStorageInspector() {
+  if (!storageInspectorBackdrop) return;
+  storageInspectorBackdrop.style.display = "flex";
+  if (storageInspectorBody) {
+    storageInspectorBody.innerHTML = `<div style="text-align:center; padding:32px; color:var(--text-muted); font-size:13px;">Loading storage telemetry...</div>`;
+  }
+  try {
+    const res = await fetch("/api/stats", { headers: vaultHeaders() });
+    if (res.ok) {
+      const stats = await res.json();
+      renderStorageInspector(stats);
+    } else {
+      if (storageInspectorBody) {
+        storageInspectorBody.innerHTML = `<div style="text-align:center; padding:32px; color:var(--danger); font-size:13px;">Failed to load storage telemetry.</div>`;
+      }
+    }
+  } catch (err) {
+    if (storageInspectorBody) {
+      storageInspectorBody.innerHTML = `<div style="text-align:center; padding:32px; color:var(--danger); font-size:13px;">Error loading storage metrics: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+}
+
+function closeStorageInspector() {
+  if (storageInspectorBackdrop) {
+    storageInspectorBackdrop.style.display = "none";
+  }
+}
+
+function renderStorageInspector(stats) {
+  if (!storageInspectorBody) return;
+
+  const ramUsed = Number(stats.ram_used ?? stats.used ?? stats.ram_bytes ?? 0);
+  const ramTotal = Number(stats.ram_total ?? stats.total ?? 1024 * 1024 * 1024);
+  const ramPct = ramTotal > 0 ? Math.min(100, Math.max(0, (ramUsed / ramTotal) * 100)) : 0;
+
+  const activeNotesBytes = Number(stats.active_notes_bytes || 0);
+  const activeNotesCount = Number(stats.active_count || 0);
+  const attBytes = Number(stats.total_files_bytes || stats.active_attachments_bytes || 0);
+  const attCount = Number(stats.total_files_count || 0);
+  const trashBytes = Number(stats.trash_total_bytes || stats.trashed_notes_bytes || 0);
+  const trashCount = Number(stats.trashed_count || 0);
+
+  const persistUsed = Number(stats.persist_used ?? stats.disk_used ?? stats.persist_bytes ?? 0);
+  const persistTotal = Number(stats.persist_total ?? stats.disk_total ?? 0);
+  const persistNotesCount = Number(stats.persist_count || 0);
+  const isPersistMounted = Boolean(stats.persist_available);
+
+  const workspaces = Array.isArray(stats.workspaces) ? stats.workspaces : [];
+  const topAttachments = Array.isArray(stats.top_attachments) ? stats.top_attachments : [];
+  const orphanedCount = Number(stats.orphaned_count || 0);
+  const orphanedBytes = Number(stats.orphaned_bytes || 0);
+
+  let html = `
+    <!-- 1. Volatile RAM (tmpfs /data) -->
+    <div class="inspector-section">
+      <div class="inspector-sec-head">
+        <span class="inspector-sec-title">
+          <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M4 6h16v12H4z"/></svg>
+          Volatile RAM (tmpfs /data)
+        </span>
+        <span class="inspector-sec-badge">${formatBytes(ramUsed)} / ${formatBytes(ramTotal)} (${ramPct.toFixed(1)}%)</span>
+      </div>
+      <div class="inspector-progress-track">
+        <div class="inspector-progress-fill" style="width: ${ramPct.toFixed(1)}%;"></div>
+      </div>
+      <div class="inspector-grid-3">
+        <div class="inspector-stat-card">
+          <span class="inspector-stat-label">Active Notes</span>
+          <span class="inspector-stat-val">${formatBytes(activeNotesBytes)}</span>
+          <span class="inspector-stat-sub">${activeNotesCount} notes</span>
+        </div>
+        <div class="inspector-stat-card">
+          <span class="inspector-stat-label">Attachments</span>
+          <span class="inspector-stat-val">${formatBytes(attBytes)}</span>
+          <span class="inspector-stat-sub">${attCount} files</span>
+        </div>
+        <div class="inspector-stat-card">
+          <span class="inspector-stat-label">Trash (Pending)</span>
+          <span class="inspector-stat-val">${formatBytes(trashBytes)}</span>
+          <span class="inspector-stat-sub">${trashCount} notes</span>
+        </div>
+      </div>
+      <div class="inspector-footnote">* Note: RAM tmpfs and Trash are auto-purged on container restart & 7-day retention.</div>
+    </div>
+
+    <!-- 2. Persisted Storage (/persist) -->
+    <div class="inspector-section">
+      <div class="inspector-sec-head">
+        <span class="inspector-sec-title">
+          <svg style="width:14px;height:14px;fill:currentColor;" viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></svg>
+          Persisted Storage (/persist)
+        </span>
+        <span class="inspector-sec-badge" style="${isPersistMounted ? 'color:#81c995; background:rgba(129,201,149,0.1); border-color:rgba(129,201,149,0.25);' : 'color:#f28b82; background:rgba(242,139,130,0.1); border-color:rgba(242,139,130,0.25);'}">
+          ${isPersistMounted ? 'Mounted & Active' : 'Not Mounted'}
+        </span>
+      </div>
+      <div class="inspector-grid-3" style="grid-template-columns: repeat(2, 1fr);">
+        <div class="inspector-stat-card">
+          <span class="inspector-stat-label">Disk Usage</span>
+          <span class="inspector-stat-val">${isPersistMounted ? formatBytes(persistUsed) + (persistTotal ? ` / ${formatBytes(persistTotal)}` : "") : "N/A"}</span>
+          <span class="inspector-stat-sub">${isPersistMounted ? "Persistent volume on host" : "Volume mount missing"}</span>
+        </div>
+        <div class="inspector-stat-card">
+          <span class="inspector-stat-label">Shielded Notes</span>
+          <span class="inspector-stat-val">${persistNotesCount} notes</span>
+          <span class="inspector-stat-sub">Persisted to disk safely</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Workspace Storage -->
+    <div class="inspector-section">
+      <div class="inspector-sec-head">
+        <span class="inspector-sec-title">Workspace Storage</span>
+        <span class="inspector-sec-badge">${workspaces.length} Workspaces</span>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        ${workspaces.map(ws => `
+          <div class="inspector-item-row">
+            <div class="inspector-item-info">
+              <span class="inspector-item-name">${escapeHtml(ws.name)}</span>
+              <span class="inspector-item-meta">
+                <span>${ws.active_notes} active notes</span>
+                <span>•</span>
+                <span>${ws.attachments_count} files (${formatBytes(ws.bytes)})</span>
+              </span>
+            </div>
+            <div class="inspector-actions-cell">
+              <span class="inspector-stat-sub">${ws.total_notes} total</span>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+
+    <!-- 4. Top 3 Largest Attachments -->
+    <div class="inspector-section">
+      <div class="inspector-sec-head">
+        <span class="inspector-sec-title">Top 3 Largest Attachments</span>
+        <span class="inspector-sec-badge">${topAttachments.length} Tracked</span>
+      </div>
+      ${topAttachments.length > 0 ? `
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          ${topAttachments.map(att => `
+            <div class="inspector-item-row">
+              <div class="inspector-item-info">
+                <span class="inspector-item-name">${escapeHtml(att.filename)}</span>
+                <span class="inspector-item-meta">
+                  <span>Note: "${escapeHtml(att.note_title)}"</span>
+                  <span>•</span>
+                  <span style="font-family:var(--mono); color:#fff; font-weight:600;">${formatBytes(att.size)}</span>
+                </span>
+              </div>
+              <div class="inspector-actions-cell">
+                <button class="btn-secondary inspector-jump-btn" data-note-id="${att.note_id}" style="padding:4px 10px; font-size:11.5px;">Jump</button>
+                <button class="btn-danger inspector-del-att-btn" data-note-id="${att.note_id}" data-att-id="${att.id}" style="padding:4px 10px; font-size:11.5px;">Delete</button>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      ` : `
+        <div class="clean-healthy-box">No attachments currently stored.</div>
+      `}
+    </div>
+
+    <!-- 5. Orphaned Files Detector -->
+    <div class="inspector-section">
+      <div class="inspector-sec-head">
+        <span class="inspector-sec-title">Orphaned Files Detector</span>
+      </div>
+      ${orphanedCount > 0 ? `
+        <div class="orphan-alert-box">
+          <div>
+            <strong>⚠️ ${orphanedCount} Orphaned File${orphanedCount > 1 ? "s" : ""} Detected</strong>
+            <div style="font-size:11.5px; opacity:0.9; margin-top:2px;">
+              Occupying ${formatBytes(orphanedBytes)} unreferenced in storage (/data or /persist).
+            </div>
+          </div>
+          <button class="btn-danger" id="inspector-purge-btn" style="padding:6px 14px; font-size:12px; white-space:nowrap;">
+            Purge Orphans
+          </button>
+        </div>
+      ` : `
+        <div class="clean-healthy-box">
+          <svg style="width:16px;height:16px;fill:currentColor;flex-shrink:0;" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+          <span>All clean! No unreferenced or orphaned files detected in tmpfs RAM or disk storage.</span>
+        </div>
+      `}
+    </div>
+  `;
+
+  storageInspectorBody.innerHTML = html;
+
+  // Wire Jump buttons
+  storageInspectorBody.querySelectorAll(".inspector-jump-btn").forEach(btn => {
+    btn.onclick = () => {
+      const noteId = btn.dataset.noteId;
+      closeStorageInspector();
+      if (noteId) {
+        openEditModal(noteId);
+      }
+    };
+  });
+
+  // Wire Delete Attachment buttons
+  storageInspectorBody.querySelectorAll(".inspector-del-att-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const noteId = btn.dataset.noteId;
+      const attId = btn.dataset.attId;
+      if (!confirm("Delete this attachment from the note to free storage?")) return;
+      try {
+        const res = await fetch(`/api/notes/${noteId}/attachments/${attId}`, {
+          method: "DELETE",
+          headers: vaultHeaders()
+        });
+        if (res.ok) {
+          showToast("Attachment deleted");
+          await loadNotes(false);
+          await updateStats();
+        } else {
+          showToast("Failed to delete attachment");
+        }
+      } catch (err) {
+        showToast("Error deleting attachment");
+      }
+    };
+  });
+
+  // Wire Purge Orphans button
+  const purgeBtn = storageInspectorBody.querySelector("#inspector-purge-btn");
+  if (purgeBtn) {
+    purgeBtn.onclick = async () => {
+      purgeBtn.disabled = true;
+      purgeBtn.textContent = "Purging...";
+      try {
+        const res = await fetch("/api/stats/purge-orphans", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...vaultHeaders() }
+        });
+        if (res.ok) {
+          const result = await res.json();
+          showToast(`Purged ${result.purged_count} orphaned file(s) (reclaimed ${formatBytes(result.reclaimed_bytes)})`);
+          await loadNotes(false);
+          await updateStats();
+        } else {
+          showToast("Failed to purge orphaned files");
+        }
+      } catch (err) {
+        showToast("Error purging orphaned files");
+      }
+    };
   }
 }
 
@@ -3919,6 +4193,7 @@ function setupEventListeners() {
     const isEditable = e.target && (e.target.isContentEditable || activeTag === "input" || activeTag === "textarea" || activeTag === "select");
     const isModalOpen = (editModalBackdrop && editModalBackdrop.style.display === "flex") ||
                         (cmdPaletteBackdrop && cmdPaletteBackdrop.style.display === "flex") ||
+                        (storageInspectorBackdrop && storageInspectorBackdrop.style.display === "flex") ||
                         (vaultModalBackdrop && vaultModalBackdrop.style.display === "flex") ||
                         (tagPromptBackdrop && tagPromptBackdrop.style.display === "flex") ||
                         (cliModalBackdrop && cliModalBackdrop.style.display === "flex") ||
@@ -3953,6 +4228,8 @@ function setupEventListeners() {
       }
       if (cmdPaletteBackdrop.style.display === "flex") {
         closeCommandPalette();
+      } else if (storageInspectorBackdrop && storageInspectorBackdrop.style.display === "flex") {
+        closeStorageInspector();
       } else if (editModalBackdrop.style.display === "flex") {
         closeEditModal();
       } else if (qrModalBackdrop.style.display === "flex") {
@@ -3972,6 +4249,22 @@ function setupEventListeners() {
       }
     }
   });
+
+  // Storage & Attachment Inspector wiring
+  if (ramPill) {
+    ramPill.onclick = () => openStorageInspector();
+  }
+  if (sidebarRamPill) {
+    sidebarRamPill.onclick = () => openStorageInspector();
+  }
+  if (storageInspectorCloseBtn) {
+    storageInspectorCloseBtn.onclick = () => closeStorageInspector();
+  }
+  if (storageInspectorBackdrop) {
+    storageInspectorBackdrop.onclick = (e) => {
+      if (e.target === storageInspectorBackdrop) closeStorageInspector();
+    };
+  }
 
   // Tag Prompt Modal
   tagPromptCancelBtn.onclick = () => (tagPromptBackdrop.style.display = "none");

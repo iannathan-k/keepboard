@@ -729,35 +729,136 @@ async def health_check():
 
 @app.get("/api/stats")
 async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
-    """Return storage metrics, note counts, and RAM tmpfs utilization."""
+    """Return storage metrics, note counts, RAM tmpfs utilization, and attachment health."""
     async with notes_lock:
         all_notes = read_notes_sync()
+        workspaces_data = read_workspaces_sync()
 
     vault_ok = _validate_vault_token(x_vault_token)
     notes_in_view = [n for n in all_notes if not n.get("is_vault") or vault_ok]
 
-    active_count = len([n for n in notes_in_view if not (n.get("trashed") or n.get("is_trash")) and not (n.get("archived") or n.get("is_archived"))])
-    archived_count = len([n for n in notes_in_view if (n.get("archived") or n.get("is_archived")) and not (n.get("trashed") or n.get("is_trash"))])
-    trashed_count = len([n for n in notes_in_view if (n.get("trashed") or n.get("is_trash"))])
+    active_notes = [n for n in notes_in_view if not (n.get("trashed") or n.get("is_trash")) and not (n.get("archived") or n.get("is_archived"))]
+    archived_notes = [n for n in notes_in_view if (n.get("archived") or n.get("is_archived")) and not (n.get("trashed") or n.get("is_trash"))]
+    trashed_notes = [n for n in notes_in_view if (n.get("trashed") or n.get("is_trash"))]
     vault_count = len([n for n in all_notes if n.get("is_vault")])
     persist_count = len([n for n in all_notes if n.get("saved_to_disk")])
 
-    total_files_bytes = 0
-    total_files_count = 0
+    active_count = len(active_notes)
+    archived_count = len(archived_notes)
+    trashed_count = len(trashed_notes)
+
+    # Calculate RAM bytes breakdown
+    active_notes_bytes = sum(len(json.dumps(n, ensure_ascii=False).encode("utf-8")) for n in active_notes)
+    archived_notes_bytes = sum(len(json.dumps(n, ensure_ascii=False).encode("utf-8")) for n in archived_notes)
+    trashed_notes_bytes = sum(len(json.dumps(n, ensure_ascii=False).encode("utf-8")) for n in trashed_notes)
+
+    active_attachments_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in active_notes + archived_notes)
+    trashed_attachments_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in trashed_notes)
+    trash_total_bytes = trashed_notes_bytes + trashed_attachments_bytes
+
+    total_files_bytes = active_attachments_bytes + trashed_attachments_bytes
+    total_files_count = sum(len(n.get("attachments", [])) for n in all_notes)
+
+    # All attachments across all notes for top 3 largest inspector
+    all_attachments_list = []
+    valid_stored_names = set()
     for n in all_notes:
+        n_title = (n.get("title") or "").strip() or "Untitled"
         for att in n.get("attachments", []):
-            total_files_bytes += att.get("size", 0)
-            total_files_count += 1
+            sname = att.get("stored_name")
+            if sname:
+                valid_stored_names.add(sname)
+            all_attachments_list.append({
+                "id": att.get("id"),
+                "note_id": n.get("id"),
+                "note_title": n_title,
+                "filename": att.get("filename", "file.bin"),
+                "size": att.get("size", 0),
+                "content_type": att.get("content_type", "")
+            })
+
+    all_attachments_list.sort(key=lambda a: a.get("size", 0), reverse=True)
+    top_attachments = all_attachments_list[:3]
+
+    # Workspace note and attachment counts
+    workspace_stats = []
+    for ws in workspaces_data:
+        ws_id = ws["id"]
+        ws_notes = [n for n in all_notes if (n.get("workspace") or "default") == ws_id]
+        ws_active = [n for n in ws_notes if not (n.get("trashed") or n.get("is_trash"))]
+        ws_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in ws_notes)
+        workspace_stats.append({
+            "id": ws_id,
+            "name": ws["name"],
+            "total_notes": len(ws_notes),
+            "active_notes": len(ws_active),
+            "attachments_count": sum(len(n.get("attachments", [])) for n in ws_notes),
+            "bytes": ws_bytes
+        })
+
+    # Detect Orphaned Files (files on disk not referenced in any note's attachments)
+    orphans = []
+    seen_orphans = set()
+    if os.path.exists(FILES_DIR):
+        for fname in os.listdir(FILES_DIR):
+            if fname.startswith("."):
+                continue
+            if fname not in valid_stored_names:
+                fpath = os.path.join(FILES_DIR, fname)
+                if os.path.isfile(fpath):
+                    fsize = 0
+                    try:
+                        fsize = os.path.getsize(fpath)
+                    except Exception:
+                        pass
+                    orphans.append({
+                        "filename": fname,
+                        "size": fsize,
+                        "location": "ram"
+                    })
+                    seen_orphans.add(fname)
+
+    if is_persist_available() and os.path.exists(PERSIST_FILES_DIR):
+        for fname in os.listdir(PERSIST_FILES_DIR):
+            if fname.startswith("."):
+                continue
+            if fname not in valid_stored_names:
+                fpath = os.path.join(PERSIST_FILES_DIR, fname)
+                if os.path.isfile(fpath):
+                    fsize = 0
+                    try:
+                        fsize = os.path.getsize(fpath)
+                    except Exception:
+                        pass
+                    if fname in seen_orphans:
+                        for o in orphans:
+                            if o["filename"] == fname:
+                                o["location"] = "both"
+                                break
+                    else:
+                        orphans.append({
+                            "filename": fname,
+                            "size": fsize,
+                            "location": "persist"
+                        })
+
+    orphaned_count = len(orphans)
+    orphaned_bytes = sum(o["size"] for o in orphans)
+
+    # Standard tmpfs capacity (1 GB default target)
+    RAM_LIMIT_BYTES = 1024 * 1024 * 1024
 
     # Measure RAM tmpfs (/data) storage
-    ram_total = 0
+    ram_total = RAM_LIMIT_BYTES
     ram_used = 0
-    ram_free = 0
+    ram_free = RAM_LIMIT_BYTES
     data_bytes = 0
     try:
         if os.path.exists(DATA_DIR):
             usage = shutil.disk_usage(DATA_DIR)
-            ram_total = usage.total
+            # If inside real tmpfs container where total is <= 2GB, use it; otherwise standard 1 GB capacity
+            if 0 < usage.total <= 2 * 1024 * 1024 * 1024:
+                ram_total = usage.total
             ram_used = usage.used
             ram_free = usage.free
             for root, dirs, files in os.walk(DATA_DIR):
@@ -796,9 +897,16 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
     return {
         "ram_used": ram_used,
         "ram_total": ram_total,
+        "ram_limit": RAM_LIMIT_BYTES,
         "ram_free": ram_free,
         "ram_bytes": data_bytes,
         "ram_percent": round((ram_used / ram_total * 100), 1) if ram_total > 0 else 0.0,
+        "active_notes_bytes": active_notes_bytes,
+        "archived_notes_bytes": archived_notes_bytes,
+        "trashed_notes_bytes": trashed_notes_bytes,
+        "active_attachments_bytes": active_attachments_bytes,
+        "trashed_attachments_bytes": trashed_attachments_bytes,
+        "trash_total_bytes": trash_total_bytes,
         "persist_used": persist_used,
         "persist_total": persist_total,
         "persist_free": persist_free,
@@ -812,6 +920,11 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
         "total_notes": len(all_notes),
         "total_files_count": total_files_count,
         "total_files_bytes": total_files_bytes,
+        "workspaces": workspace_stats,
+        "top_attachments": top_attachments,
+        "orphaned_count": orphaned_count,
+        "orphaned_bytes": orphaned_bytes,
+        "orphans": orphans[:10],
         "storage_dir": DATA_DIR,
         # Backward-compatible aliases
         "used": ram_used,
@@ -819,6 +932,60 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
         "free": ram_free,
         "disk_used": persist_used,
         "disk_total": persist_total
+    }
+
+
+@app.post("/api/stats/purge-orphans")
+@app.delete("/api/attachments/orphans")
+async def purge_orphans():
+    """Detect and permanently purge unreferenced orphaned files from /data and /persist."""
+    async with notes_lock:
+        all_notes = read_notes_sync()
+        valid_stored_names = set()
+        for n in all_notes:
+            for att in n.get("attachments", []):
+                sname = att.get("stored_name")
+                if sname:
+                    valid_stored_names.add(sname)
+
+        purged_count = 0
+        reclaimed_bytes = 0
+
+        # Purge from /data/files
+        if os.path.exists(FILES_DIR):
+            for fname in os.listdir(FILES_DIR):
+                if fname.startswith("."):
+                    continue
+                if fname not in valid_stored_names:
+                    fpath = os.path.join(FILES_DIR, fname)
+                    if os.path.isfile(fpath):
+                        try:
+                            reclaimed_bytes += os.path.getsize(fpath)
+                            os.remove(fpath)
+                            purged_count += 1
+                        except Exception:
+                            pass
+
+        # Purge from /persist/files if available
+        if is_persist_available() and os.path.exists(PERSIST_FILES_DIR):
+            for fname in os.listdir(PERSIST_FILES_DIR):
+                if fname.startswith("."):
+                    continue
+                if fname not in valid_stored_names:
+                    fpath = os.path.join(PERSIST_FILES_DIR, fname)
+                    if os.path.isfile(fpath):
+                        try:
+                            reclaimed_bytes += os.path.getsize(fpath)
+                            os.remove(fpath)
+                            purged_count += 1
+                        except Exception:
+                            pass
+
+    asyncio.create_task(broadcast_event("notes_updated", {"action": "orphans_purged", "count": purged_count}))
+    return {
+        "status": "purged",
+        "purged_count": purged_count,
+        "reclaimed_bytes": reclaimed_bytes
     }
 
 

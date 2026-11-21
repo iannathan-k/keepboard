@@ -183,6 +183,17 @@
     </div>
 
     <div class="sidebar-footer">
+      <!-- Clickable Sidebar In RAM Indicator -->
+      <div class="sidebar-ram-pill" id="sidebar-ram-pill" title="Click to open Storage & Attachment Inspector">
+        <div class="sidebar-ram-row">
+          <span class="ram-dot"></span>
+          <span id="sidebar-ram-text">In RAM: 0.0 MB</span>
+        </div>
+        <div class="sidebar-ram-bar">
+          <div id="sidebar-ram-fill" class="sidebar-ram-fill" style="width: 0%;"></div>
+        </div>
+      </div>
+
       <div class="nav-item" id="btn-export-backup" title="Export entire workspace and files to encrypted ZIP">
         <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
         <span>Export Backup</span>
@@ -651,6 +662,28 @@
       <div style="display:flex; justify-content:flex-end; gap:8px;">
         <button class="btn-secondary" id="tag-prompt-cancel-btn">Cancel</button>
         <button class="btn-save" id="tag-prompt-ok-btn">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Storage & Attachment Inspector Modal -->
+  <div class="modal-backdrop" id="storage-inspector-backdrop">
+    <div class="modal-card storage-inspector-card" id="storage-inspector-card">
+      <div class="inspector-header">
+        <div class="inspector-title-wrap">
+          <div class="inspector-icon-badge">
+            <svg viewBox="0 0 24 24"><path d="M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z"/></svg>
+          </div>
+          <div>
+            <h3 class="inspector-title">Storage &amp; Attachment Inspector</h3>
+            <p class="inspector-subtitle">Live tmpfs RAM allocation, persistence health, and attachment breakdown</p>
+          </div>
+        </div>
+        <button class="btn-icon" id="storage-inspector-close-btn" title="Close Inspector">✕</button>
+      </div>
+
+      <div class="inspector-body" id="storage-inspector-body">
+        <!-- Rendered dynamically via app.js -->
       </div>
     </div>
   </div>
