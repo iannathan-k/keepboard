@@ -101,6 +101,75 @@ export function setupInlineMath(editorEl) {
   });
 }
 
+// Smart Markdown Typing in rich editors:
+// Typing '# ' or '## ' or '### ' at line start converts into heading.
+// Typing '- [ ] ' at line start converts into interactive checklist item.
+export function setupSmartTyping(editorEl, onChecklistTrigger) {
+  if (!editorEl) return;
+  editorEl.addEventListener("keyup", (e) => {
+    if (e.key !== " " && e.key !== "Spacebar") return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const node = sel.anchorNode;
+    if (!node || node.nodeType !== Node.TEXT_NODE) return;
+
+    const text = node.textContent;
+    const offset = sel.anchorOffset;
+    const textBefore = text.substring(0, offset);
+    const lineStart = Math.max(textBefore.lastIndexOf("\n") + 1, 0);
+    const lineText = textBefore.substring(lineStart);
+
+    if (lineText === "# ") {
+      node.textContent = text.substring(0, lineStart) + text.substring(offset);
+      const newRange = document.createRange();
+      newRange.setStart(node, lineStart);
+      newRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(newRange);
+      document.execCommand("formatBlock", false, "<h1>");
+      return;
+    }
+
+    if (lineText === "## ") {
+      node.textContent = text.substring(0, lineStart) + text.substring(offset);
+      const newRange = document.createRange();
+      newRange.setStart(node, lineStart);
+      newRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(newRange);
+      document.execCommand("formatBlock", false, "<h2>");
+      return;
+    }
+
+    if (lineText === "### ") {
+      node.textContent = text.substring(0, lineStart) + text.substring(offset);
+      const newRange = document.createRange();
+      newRange.setStart(node, lineStart);
+      newRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(newRange);
+      document.execCommand("formatBlock", false, "<h3>");
+      return;
+    }
+
+    if (lineText === "- [ ] " || lineText === "- [] " || lineText === "* [ ] " || lineText === "* [] ") {
+      node.textContent = text.substring(0, lineStart) + text.substring(offset);
+      const newRange = document.createRange();
+      newRange.setStart(node, lineStart);
+      newRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(newRange);
+
+      if (typeof onChecklistTrigger === "function") {
+        onChecklistTrigger();
+      } else {
+        document.execCommand("insertHTML", false, '<div class="rich-todo-item" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" style="margin-right:4px;"><span>&nbsp;</span></div>');
+      }
+      return;
+    }
+  });
+}
+
 // Document Outline Extractor: extracts H1, H2, H3 with smooth scroll
 export function extractDocumentOutline(editorEl, outlineContainer) {
   if (!editorEl || !outlineContainer) return;

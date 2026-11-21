@@ -9,6 +9,7 @@ import {
   applyTextStyle,
   setupCleanPaste,
   setupInlineMath,
+  setupSmartTyping,
   extractDocumentOutline,
   calculateChecklistProgress,
   uncheckAllItems,
@@ -42,18 +43,63 @@ if (typeof window !== "undefined") {
   document.addEventListener("drop", preventNav, false);
 }
 
-// ── Constants & Color Palettes ─────────────────────────────────────────────
+// ── Classic Google Keep Dark Palette (Palette A2) ──────────────────────────
 const PALETTES = {
-  default: "#1b1c1f",
-  coral: "#4a2424",
-  peach: "#483220",
-  sand: "#443e22",
-  mint: "#1e3d34",
-  sage: "#233d2c",
-  fog: "#203445",
-  dusk: "#332948",
-  blush: "#422238",
+  default: { bg: "#202124", border: "#3C4043" },
+  amber:   { bg: "#3C3219", border: "#614F23" },
+  coral:   { bg: "#422220", border: "#6B3532" },
+  sage:    { bg: "#1F3529", border: "#315742" },
+  teal:    { bg: "#1B3538", border: "#2B565C" },
+  cobalt:  { bg: "#1E2E42", border: "#304B6E" },
+  plum:    { bg: "#31233E", border: "#513866" },
+  rose:    { bg: "#3D2232", border: "#633550" },
 };
+
+const LEGACY_COLOR_MAP = {
+  peach: "amber",
+  sand: "amber",
+  mint: "teal",
+  fog: "cobalt",
+  dusk: "plum",
+  blush: "rose",
+  "#1b1c1f": "default",
+  "#202124": "default",
+  "#483220": "amber",
+  "#443e22": "amber",
+  "#3c3219": "amber",
+  "#4a2424": "coral",
+  "#422220": "coral",
+  "#1e3d34": "teal",
+  "#1b3538": "teal",
+  "#233d2c": "sage",
+  "#1f3529": "sage",
+  "#203445": "cobalt",
+  "#1e2e42": "cobalt",
+  "#332948": "plum",
+  "#31233e": "plum",
+  "#422238": "rose",
+  "#3d2232": "rose",
+};
+
+function normalizeColorName(c) {
+  if (!c) return "default";
+  const lower = String(c).trim().toLowerCase();
+  if (PALETTES[lower]) return lower;
+  if (LEGACY_COLOR_MAP[lower]) return LEGACY_COLOR_MAP[lower];
+  return "default";
+}
+
+function paletteFor(color) {
+  const name = normalizeColorName(color);
+  const pal = PALETTES[name] || PALETTES.default;
+  return {
+    name,
+    bg: pal.bg,
+    border: pal.border,
+    toString() { return pal.bg; },
+    valueOf() { return pal.bg; },
+  };
+}
 
 // ── Application State ──────────────────────────────────────────────────────
 let allNotes = [];
@@ -355,18 +401,15 @@ function isArchiveFile(filename) {
   return ["zip", "tar", "gz", "tgz"].includes(ext);
 }
 
-function paletteFor(color) {
-  return PALETTES[color] || PALETTES.default;
-}
-
 // ── Swatch Picker Renderer ─────────────────────────────────────────────────
 function renderSwatches(container, onSelect, currentSelected = "default") {
   container.innerHTML = "";
+  const curNorm = normalizeColorName(currentSelected);
   Object.keys(PALETTES).forEach((c) => {
     const circle = document.createElement("div");
-    circle.className = `color-swatch-circle ${c === currentSelected ? "selected" : ""}`;
-    circle.style.backgroundColor = PALETTES[c];
-    circle.style.border = c === "default" ? "1px solid #444" : "1px solid rgba(255,255,255,0.15)";
+    circle.className = `color-swatch-circle ${c === curNorm ? "selected" : ""}`;
+    circle.style.backgroundColor = PALETTES[c].bg;
+    circle.style.border = `1.5px solid ${PALETTES[c].border}`;
     circle.title = c.charAt(0).toUpperCase() + c.slice(1);
     circle.onclick = (e) => {
       e.stopPropagation();
@@ -375,6 +418,60 @@ function renderSwatches(container, onSelect, currentSelected = "default") {
     };
     container.appendChild(circle);
   });
+}
+
+// ── Markdown Exporter ──────────────────────────────────────────────────────
+function exportNoteMarkdown(note) {
+  let md = "";
+  if (note.title) {
+    md += `# ${note.title}\n\n`;
+  }
+  if (note.tags && Array.isArray(note.tags) && note.tags.length > 0) {
+    md += `Tags: ${note.tags.map((t) => (t.startsWith("#") ? t : "#" + t)).join(" ")}\n\n`;
+  }
+  if (note.checklist && Array.isArray(note.checklist) && note.checklist.length > 0) {
+    note.checklist.forEach((it) => {
+      const indent = "  ".repeat(it.indent || 0);
+      md += `${indent}- [${it.checked ? "x" : " "}] ${it.text || ""}\n`;
+    });
+    md += "\n";
+  }
+  if (note.content) {
+    const cleanContent = (note.content || "")
+      .replace(/<br\s*[\/]?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<\/div>/gi, "\n")
+      .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, "# $1\n\n")
+      .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, "## $1\n\n")
+      .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, "### $1\n\n")
+      .replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, "- $1\n")
+      .replace(/<[^>]+>/g, "");
+    md += cleanContent.trim() + "\n";
+  }
+
+  const safeTitle = (note.title ? note.title.trim().replace(/[^a-zA-Z0-9_-]+/g, "_") : `note_${(note.id || "export").substring(0, 8)}`) + ".md";
+  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = safeTitle;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`Exported ${safeTitle}`);
+}
+
+// ── Storage Status Badge Helper ────────────────────────────────────────────
+function updateStorageBadge(badgeEl, isDisk) {
+  if (!badgeEl) return;
+  if (isDisk) {
+    badgeEl.className = "storage-status-badge disk";
+    badgeEl.innerHTML = `<svg style="width:12px;height:12px;fill:currentColor;" viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"/></svg> Persisted to Disk`;
+  } else {
+    badgeEl.className = "storage-status-badge ram";
+    badgeEl.innerHTML = `<span style="width:6px;height:6px;border-radius:50%;background:var(--accent);display:inline-block;"></span> Saved to RAM`;
+  }
 }
 
 // ── Live SSE Synchronization ───────────────────────────────────────────────
@@ -465,8 +562,8 @@ function renderActiveFlairs() {
 
     let label = flair;
     if (flair.startsWith("color:")) {
-      const c = flair.replace("color:", "");
-      label = `🎨 ${c}`;
+      const c = normalizeColorName(flair.replace("color:", ""));
+      label = `🎨 ${c.charAt(0).toUpperCase() + c.slice(1)}`;
     } else if (flair === "has:files") {
       label = "📎 Files";
     } else if (flair === "is:checklist") {
@@ -607,8 +704,8 @@ function getFilteredNotes() {
         } else if (flair === "is:saved") {
           if (!note.saved_to_disk) return false;
         } else if (flair.startsWith("color:")) {
-          const col = flair.replace("color:", "");
-          if ((note.color || "default") !== col) return false;
+          const col = normalizeColorName(flair.replace("color:", ""));
+          if (normalizeColorName(note.color) !== col) return false;
         } else if (flair.startsWith("#")) {
           const tag = flair.replace("#", "").toLowerCase();
           const noteTags = (note.tags || []).map((t) => t.toLowerCase().replace("#", ""));
@@ -741,9 +838,11 @@ function renderNotesGrid() {
 // ── Card Element Builder ───────────────────────────────────────────────────
 function createCardElement(note) {
   const card = document.createElement("div");
-  card.className = `card ${selectedNoteIds.has(note.id) ? "selected" : ""}`;
+  const pal = paletteFor(note.color);
+  card.className = `card note-color-${pal.name} ${selectedNoteIds.has(note.id) ? "selected" : ""}`;
   card.dataset.id = note.id;
-  card.style.backgroundColor = paletteFor(note.color);
+  card.style.backgroundColor = pal.bg;
+  card.style.borderColor = pal.border;
 
   // Wire per-card dropzone
   setupCardDropzone(card, note.id, {
@@ -817,7 +916,7 @@ function createCardElement(note) {
 
   const fadeEl = document.createElement("div");
   fadeEl.className = "card-content-fade";
-  fadeEl.style.background = `linear-gradient(to bottom, transparent, ${paletteFor(note.color)})`;
+  fadeEl.style.background = `linear-gradient(to bottom, transparent, ${pal.bg})`;
   clampedWrapper.appendChild(fadeEl);
 
   card.appendChild(clampedWrapper);
@@ -1233,6 +1332,17 @@ function createCardElement(note) {
     };
     morePopover.appendChild(dupItem);
 
+    // Export Markdown (.md)
+    const exportItem = document.createElement("button");
+    exportItem.className = "card-more-item";
+    exportItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg><span>Export Markdown (.md)</span>`;
+    exportItem.onclick = (e) => {
+      e.stopPropagation();
+      morePopover.classList.remove("show");
+      exportNoteMarkdown(note);
+    };
+    morePopover.appendChild(exportItem);
+
     // Divider
     const moreDivider = document.createElement("div");
     moreDivider.className = "card-more-divider";
@@ -1577,14 +1687,18 @@ async function openEditModal(noteId) {
   modalRawMode = false;
   modalRawTextarea.style.display = "none";
   modalRichEditor.style.display = "block";
-  modalColor = note.color || "default";
+  modalColor = normalizeColorName(note.color);
   modalIsPinned = Boolean(note.is_pinned);
   modalTags = new Set(note.tags || []);
   modalChecklistItems = note.checklist ? JSON.parse(JSON.stringify(note.checklist)) : [];
   modalPendingFiles = [];
 
-  editModalCard.style.backgroundColor = paletteFor(modalColor);
+  const mPal = paletteFor(modalColor);
+  editModalCard.style.backgroundColor = mPal.bg;
+  editModalCard.style.borderColor = mPal.border;
   modalPinBtn.style.color = modalIsPinned ? "var(--accent)" : "inherit";
+  const modalStorageBadge = document.getElementById("modal-storage-badge");
+  updateStorageBadge(modalStorageBadge, Boolean(note.saved_to_disk));
   if (modalShieldBtn) {
     modalShieldBtn.classList.toggle("active", Boolean(note.saved_to_disk));
     modalShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
@@ -1775,9 +1889,11 @@ function renderSplitWorkspace() {
     if (!note) return;
 
     const pane = document.createElement("div");
-    pane.className = "split-pane";
+    const sPal = paletteFor(note.color);
+    pane.className = `split-pane note-color-${sPal.name}`;
     pane.dataset.noteId = note.id;
-    pane.style.backgroundColor = paletteFor(note.color);
+    pane.style.backgroundColor = sPal.bg;
+    pane.style.borderColor = sPal.border;
 
     // Wire dropzone on split pane
     setupCardDropzone(pane, note.id, {
@@ -1947,6 +2063,9 @@ function renderSplitWorkspace() {
       editor.innerHTML = note.content || "";
       setupCleanPaste(editor);
       setupInlineMath(editor);
+      setupSmartTyping(editor, () => {
+        if (splitChecklistBtn) splitChecklistBtn.click();
+      });
       editor.addEventListener("input", debouncedSave);
       body.appendChild(editor);
     }
@@ -2065,6 +2184,9 @@ function renderSplitWorkspace() {
     footer.appendChild(splitVoiceBtn);
 
     // 5. Persist on Disk Shield
+    const splitStorageBadge = document.createElement("span");
+    updateStorageBadge(splitStorageBadge, Boolean(note.saved_to_disk));
+
     const splitShieldBtn = document.createElement("button");
     splitShieldBtn.className = `btn-icon ${note.saved_to_disk ? "active" : ""}`;
     splitShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
@@ -2075,6 +2197,7 @@ function renderSplitWorkspace() {
       note.saved_to_disk = !note.saved_to_disk;
       splitShieldBtn.classList.toggle("active", note.saved_to_disk);
       splitShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
+      updateStorageBadge(splitStorageBadge, note.saved_to_disk);
     };
     footer.appendChild(splitShieldBtn);
 
@@ -2153,7 +2276,10 @@ function renderSplitWorkspace() {
     splitColorPopover.className = "color-popover";
     renderSwatches(splitColorPopover, async (c) => {
       note.color = c;
-      pane.style.backgroundColor = paletteFor(c);
+      const newPal = paletteFor(c);
+      pane.style.backgroundColor = newPal.bg;
+      pane.style.borderColor = newPal.border;
+      pane.className = `split-pane note-color-${newPal.name}`;
       await fetch(`/api/notes/${note.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...vaultHeaders() },
@@ -2199,6 +2325,7 @@ function renderSplitWorkspace() {
       closeSplitPane(note.id);
     };
     footer.appendChild(splitTrashBtn);
+    footer.appendChild(splitStorageBadge);
 
     pane.appendChild(footer);
     splitPanesContainer.appendChild(pane);
@@ -2525,13 +2652,63 @@ function renderCommandPaletteList(query) {
   cmdPaletteList.innerHTML = "";
   const q = (query || "").toLowerCase().trim();
 
+  // 1. Workspaces (Quick Switcher)
+  const matchedWorkspaces = allWorkspaces.filter((w) => (w.name || "").toLowerCase().includes(q));
+  if (matchedWorkspaces.length > 0) {
+    const wsHeader = document.createElement("div");
+    wsHeader.className = "cmd-group-label";
+    wsHeader.textContent = "Workspaces";
+    cmdPaletteList.appendChild(wsHeader);
+
+    matchedWorkspaces.forEach((ws) => {
+      const el = document.createElement("div");
+      el.className = "cmd-item";
+      el.innerHTML = `<span>Switch to Workspace: <b>${escapeHtml(ws.name)}</b></span><span class="cmd-item-shortcut">${ws.id === currentWorkspaceId ? "Active" : "Jump"}</span>`;
+      el.onclick = () => {
+        closeCommandPalette();
+        switchWorkspace(ws.id);
+      };
+      cmdPaletteList.appendChild(el);
+    });
+  }
+
+  // 2. Labels / Tags (Quick Filter)
+  const allTags = new Set();
+  allNotes.forEach((n) => {
+    if (n.tags && Array.isArray(n.tags)) {
+      n.tags.forEach((t) => allTags.add(t.replace(/^#/, "")));
+    }
+  });
+  const matchedTags = Array.from(allTags).filter((t) => t.toLowerCase().includes(q.replace(/^#/, "")));
+  if (matchedTags.length > 0) {
+    const tagHeader = document.createElement("div");
+    tagHeader.className = "cmd-group-label";
+    tagHeader.textContent = "Labels";
+    cmdPaletteList.appendChild(tagHeader);
+
+    matchedTags.slice(0, 6).forEach((tag) => {
+      const el = document.createElement("div");
+      el.className = "cmd-item";
+      el.innerHTML = `<span>Filter by Label: <b>#${escapeHtml(tag)}</b></span><span class="cmd-item-shortcut">Filter</span>`;
+      el.onclick = () => {
+        closeCommandPalette();
+        activeSearchFlairs.clear();
+        activeSearchFlairs.add(`#${tag}`);
+        renderActiveFlairs();
+        renderNotesGrid();
+      };
+      cmdPaletteList.appendChild(el);
+    });
+  }
+
+  // 3. Actions
   const systemActions = [
     { label: "New Note", shortcut: "C", action: () => { expandComposer(); composerTitleInput.focus(); } },
     { label: "New Checklist", shortcut: "L", action: () => { expandComposer(); composerChecklistToggleBtn.click(); } },
     { label: "Cycle Grid Density", shortcut: "D", action: () => cycleGridDensity() },
     { label: "View: All Notes", shortcut: "G N", action: () => navNotes.click() },
     { label: "View: Archive", shortcut: "G A", action: () => navArchive.click() },
-    { label: "View: Trash (7-day purge)", shortcut: "G T", action: () => navTrash.click() },
+    { label: "View: Trash", shortcut: "G T", action: () => navTrash.click() },
     { label: "View: Vault", shortcut: "G V", action: () => navVault.click() },
     { label: "CLI & Piped Drops", shortcut: ">_", action: () => headerCliBtn.click() },
     { label: "Export Full ZIP Backup", shortcut: "⌘E", action: () => btnExportBackup.click() },
@@ -3064,10 +3241,34 @@ function setupEventListeners() {
     };
   });
 
+  const sidebarDrawerBackdrop = document.getElementById("sidebar-drawer-backdrop");
   menuToggleBtn.onclick = () => {
-    sidebar.classList.toggle("collapsed");
-    mainContent.classList.toggle("sidebar-collapsed");
+    if (window.innerWidth <= 768) {
+      const isOpen = sidebar.classList.toggle("drawer-open");
+      if (sidebarDrawerBackdrop) sidebarDrawerBackdrop.classList.toggle("show", isOpen);
+    } else {
+      sidebar.classList.toggle("collapsed");
+      mainContent.classList.toggle("sidebar-collapsed");
+    }
   };
+
+  if (sidebarDrawerBackdrop) {
+    sidebarDrawerBackdrop.onclick = () => {
+      sidebar.classList.remove("drawer-open");
+      sidebarDrawerBackdrop.classList.remove("show");
+    };
+  }
+
+  // Close slide-over drawer when selecting view on mobile
+  const closeDrawerOnMobile = () => {
+    if (window.innerWidth <= 768) {
+      sidebar.classList.remove("drawer-open");
+      if (sidebarDrawerBackdrop) sidebarDrawerBackdrop.classList.remove("show");
+    }
+  };
+  [navNotes, navArchive, navTrash, navVault].forEach((el) => {
+    if (el) el.addEventListener("click", closeDrawerOnMobile);
+  });
 
   // Grid Density Switcher
   densityToggleBtn.onclick = cycleGridDensity;
@@ -3171,6 +3372,13 @@ function setupEventListeners() {
   setupCleanPaste(modalRichEditor);
   setupInlineMath(composerRichEditor);
   setupInlineMath(modalRichEditor);
+  setupSmartTyping(composerRichEditor, () => {
+    if (!composerIsChecklist) composerChecklistToggleBtn.click();
+  });
+  setupSmartTyping(modalRichEditor, () => {
+    const isCurrentlyChecklist = modalChecklistContainer.style.display !== "none";
+    if (!isCurrentlyChecklist) modalChecklistBtn.click();
+  });
 
   composerFmtToggleBtn.onclick = (e) => {
     e.stopPropagation();
@@ -3260,7 +3468,9 @@ function setupEventListeners() {
   // Color Pickers
   renderSwatches(composerColorPopover, (color) => {
     composerColor = color;
-    captureBox.style.backgroundColor = paletteFor(color);
+    const cPal = paletteFor(color);
+    captureBox.style.backgroundColor = cPal.bg;
+    captureBox.style.borderColor = cPal.border;
   });
   composerColorBtn.onclick = (e) => {
     e.stopPropagation();
@@ -3269,7 +3479,9 @@ function setupEventListeners() {
 
   renderSwatches(modalColorPopover, (color) => {
     modalColor = color;
-    editModalCard.style.backgroundColor = paletteFor(color);
+    const mPal = paletteFor(color);
+    editModalCard.style.backgroundColor = mPal.bg;
+    editModalCard.style.borderColor = mPal.border;
   });
   modalColorBtn.onclick = (e) => {
     e.stopPropagation();
@@ -3433,6 +3645,8 @@ function setupEventListeners() {
     note.saved_to_disk = newSaved;
     modalShieldBtn.classList.toggle("active", newSaved);
     modalShieldBtn.title = newSaved ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
+    const modalStorageBadge = document.getElementById("modal-storage-badge");
+    updateStorageBadge(modalStorageBadge, newSaved);
     await fetch(`/api/notes/${note.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...vaultHeaders() },
@@ -3691,12 +3905,31 @@ function setupEventListeners() {
     if (e.target === cmdPaletteBackdrop) closeCommandPalette();
   };
 
-  // Keyboard Shortcuts (⌘K, ⌘Enter, Esc)
+  // Keyboard Shortcuts (⌘K, '/', ⌘Enter, Esc)
   window.addEventListener("keydown", (e) => {
     // ⌘K or Ctrl+K -> Spotlight Command Palette
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       openCommandPalette();
+      return;
+    }
+
+    // '/' to focus search bar (when not inside an input/editor/contenteditable or open modal)
+    const activeTag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : "";
+    const isEditable = e.target && (e.target.isContentEditable || activeTag === "input" || activeTag === "textarea" || activeTag === "select");
+    const isModalOpen = (editModalBackdrop && editModalBackdrop.style.display === "flex") ||
+                        (cmdPaletteBackdrop && cmdPaletteBackdrop.style.display === "flex") ||
+                        (vaultModalBackdrop && vaultModalBackdrop.style.display === "flex") ||
+                        (tagPromptBackdrop && tagPromptBackdrop.style.display === "flex") ||
+                        (cliModalBackdrop && cliModalBackdrop.style.display === "flex") ||
+                        (qrModalBackdrop && qrModalBackdrop.style.display === "flex");
+
+    if (e.key === "/" && !isEditable && !isModalOpen && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      if (searchInput) {
+        searchInput.focus();
+        searchInput.select();
+      }
       return;
     }
 
@@ -3711,8 +3944,13 @@ function setupEventListeners() {
       }
     }
 
-    // Escape -> Close modals / selection
+    // Escape -> Close modals / selection / mobile drawer
     if (e.key === "Escape") {
+      if (sidebar && sidebar.classList.contains("drawer-open")) {
+        sidebar.classList.remove("drawer-open");
+        const sdb = document.getElementById("sidebar-drawer-backdrop");
+        if (sdb) sdb.classList.remove("show");
+      }
       if (cmdPaletteBackdrop.style.display === "flex") {
         closeCommandPalette();
       } else if (editModalBackdrop.style.display === "flex") {

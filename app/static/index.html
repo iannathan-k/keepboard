@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KeepBoard</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23fbbc04'%3E%3Cpath d='M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231E2023'/%3E%3Cpath fill='%23FACC15' transform='translate(4,4)' d='M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7zm2.85 11.1l-.85.6V16h-4v-1.3l-.85-.6A5.003 5.003 0 0 1 7 9c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.63-.8 3.16-2.15 4.1z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -49,15 +49,14 @@
           <div>
             <div class="flair-group-title">Colors</div>
             <div class="flair-chips-row" id="search-flair-colors">
-              <span class="flair-chip" data-flair="color:default"><span class="flair-color-dot" style="background:#1b1c1f; border:1px solid #444;"></span> Default</span>
-              <span class="flair-chip" data-flair="color:coral"><span class="flair-color-dot" style="background:#4a2424;"></span> Coral</span>
-              <span class="flair-chip" data-flair="color:peach"><span class="flair-color-dot" style="background:#483220;"></span> Peach</span>
-              <span class="flair-chip" data-flair="color:sand"><span class="flair-color-dot" style="background:#443e22;"></span> Sand</span>
-              <span class="flair-chip" data-flair="color:mint"><span class="flair-color-dot" style="background:#1e3d34;"></span> Mint</span>
-              <span class="flair-chip" data-flair="color:sage"><span class="flair-color-dot" style="background:#233d2c;"></span> Sage</span>
-              <span class="flair-chip" data-flair="color:fog"><span class="flair-color-dot" style="background:#203445;"></span> Fog</span>
-              <span class="flair-chip" data-flair="color:dusk"><span class="flair-color-dot" style="background:#332948;"></span> Dusk</span>
-              <span class="flair-chip" data-flair="color:blush"><span class="flair-color-dot" style="background:#422238;"></span> Blush</span>
+              <span class="flair-chip" data-flair="color:default"><span class="flair-color-dot" style="background:#202124; border:1px solid #3C4043;"></span> Default</span>
+              <span class="flair-chip" data-flair="color:amber"><span class="flair-color-dot" style="background:#3C3219; border:1px solid #614F23;"></span> Amber</span>
+              <span class="flair-chip" data-flair="color:coral"><span class="flair-color-dot" style="background:#422220; border:1px solid #6B3532;"></span> Coral</span>
+              <span class="flair-chip" data-flair="color:sage"><span class="flair-color-dot" style="background:#1F3529; border:1px solid #315742;"></span> Sage</span>
+              <span class="flair-chip" data-flair="color:teal"><span class="flair-color-dot" style="background:#1B3538; border:1px solid #2B565C;"></span> Teal</span>
+              <span class="flair-chip" data-flair="color:cobalt"><span class="flair-color-dot" style="background:#1E2E42; border:1px solid #304B6E;"></span> Cobalt</span>
+              <span class="flair-chip" data-flair="color:plum"><span class="flair-color-dot" style="background:#31233E; border:1px solid #513866;"></span> Plum</span>
+              <span class="flair-chip" data-flair="color:rose"><span class="flair-color-dot" style="background:#3D2232; border:1px solid #633550;"></span> Rose</span>
             </div>
           </div>
           <div id="search-flair-tags-container" style="display:none;">
@@ -129,6 +128,9 @@
       </button>
     </div>
   </div>
+
+  <!-- Responsive Slide-Over Drawer Backdrop -->
+  <div id="sidebar-drawer-backdrop" class="sidebar-drawer-backdrop"></div>
 
   <!-- Left Navigation Sidebar -->
   <aside id="sidebar">
@@ -508,7 +510,10 @@
                 <svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>
               </button>
             </div>
-            <button class="btn-save" id="modal-close-btn">Done</button>
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span id="modal-storage-badge" class="storage-status-badge ram">Saved to RAM</span>
+              <button class="btn-save" id="modal-close-btn">Done</button>
+            </div>
           </div>
         </div>
       </div>
