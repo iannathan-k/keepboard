@@ -127,6 +127,7 @@ const batchArchiveBtn = document.getElementById("batch-archive-btn");
 const batchMergeBtn = document.getElementById("batch-merge-btn");
 const batchDownloadBtn = document.getElementById("batch-download-btn");
 const batchTrashBtn = document.getElementById("batch-trash-btn");
+const batchRestoreBtn = document.getElementById("batch-restore-btn");
 
 const sidebar = document.getElementById("sidebar");
 const workspacePillBtn = document.getElementById("workspace-pill-btn");
@@ -579,15 +580,19 @@ function getFilteredNotes() {
     if (noteWs !== activeWs) return false;
 
     // 1. Navigation View Filtering
+    const isTrashed = Boolean(note.is_trash || note.trashed);
+    const isArchived = Boolean(note.is_archived || note.archived);
+    const isVault = Boolean(note.is_vault);
+
     if (currentNavView === "trash") {
-      if (!note.is_trash) return false;
+      if (!isTrashed) return false;
     } else if (currentNavView === "archive") {
-      if (note.is_trash || !note.is_archived) return false;
+      if (isTrashed || !isArchived) return false;
     } else if (currentNavView === "vault") {
-      if (note.is_trash || !note.is_vault) return false;
+      if (isTrashed || !isVault) return false;
     } else {
       // "notes" view
-      if (note.is_trash || note.is_archived || note.is_vault) return false;
+      if (isTrashed || isArchived || isVault) return false;
     }
 
     // 2. Active Search Flairs Filtering
@@ -1112,137 +1117,150 @@ function createCardElement(note) {
   };
   colorWrap.appendChild(colorBtn);
   colorWrap.appendChild(colorPopover);
-  actionsBar.appendChild(colorWrap);
-
-  // 2. Archive / Unarchive
-  const archBtn = document.createElement("button");
-  archBtn.className = "btn-icon";
-  archBtn.title = note.is_archived ? "Unarchive" : "Archive";
-  archBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM6.24 5h11.52l.83 1H5.42l.82-1zM5 19V8h14v11H5zm7-2l5-5h-3.5V9h-3v3H7l5 5z"/></svg>`;
-  archBtn.onclick = (e) => {
-    e.stopPropagation();
-    toggleNoteArchive(note.id, !note.is_archived);
-  };
-  actionsBar.appendChild(archBtn);
-
-  // 3. Open in Split Pane
-  const splitBtn = document.createElement("button");
-  splitBtn.className = "btn-icon";
-  splitBtn.title = "Open in Split Pane (or ⌘/Ctrl+Click)";
-  splitBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 16H5V5h6v14zm8 0h-6V5h6v14z"/></svg>`;
-  splitBtn.onclick = (e) => {
-    e.stopPropagation();
-    toggleSplitPane(note.id);
-  };
-  actionsBar.appendChild(splitBtn);
-
-  // 4. More (⋮) Overflow Menu
-  const moreWrap = document.createElement("div");
-  moreWrap.style.position = "relative";
-  const moreBtn = document.createElement("button");
-  moreBtn.className = "btn-icon";
-  moreBtn.title = "More";
-  moreBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>`;
-
-  const morePopover = document.createElement("div");
-  morePopover.className = "card-more-popover";
-
-  // Move to Workspace
-  const wsItem = document.createElement("button");
-  wsItem.className = "card-more-item";
-  wsItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg><span>Move to workspace</span>`;
-  wsItem.onclick = (e) => {
-    e.stopPropagation();
-    morePopover.classList.remove("show");
-    showMoveWorkspacePopover(note.id, moreBtn);
-  };
-  morePopover.appendChild(wsItem);
-
-  // Labels
-  const tagItem = document.createElement("button");
-  tagItem.className = "card-more-item";
-  tagItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16zM16 17H5V7h11l3.55 5L16 17z"/></svg><span>Labels</span>`;
-  tagItem.onclick = (e) => {
-    e.stopPropagation();
-    morePopover.classList.remove("show");
-    openTagPromptModal(async (tag) => {
-      if (!tag) return;
-      const curTags = new Set(note.tags || []);
-      curTags.add(tag);
-      await addTagToNote(note.id, Array.from(curTags));
-    });
-  };
-  morePopover.appendChild(tagItem);
-
-  // Persist on Disk (Shield)
-  const persistItem = document.createElement("button");
-  persistItem.className = "card-more-item";
-  persistItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg><span>${note.saved_to_disk ? "Remove from disk" : "Persist on disk (Shield)"}</span>`;
-  persistItem.onclick = (e) => {
-    e.stopPropagation();
-    morePopover.classList.remove("show");
-    togglePersistNote(note.id);
-  };
-  morePopover.appendChild(persistItem);
-
-  // Lock in Vault
-  const vaultItem = document.createElement("button");
-  vaultItem.className = "card-more-item";
-  vaultItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg><span>${note.is_vault ? "Unlock from vault" : "Lock in vault"}</span>`;
-  vaultItem.onclick = (e) => {
-    e.stopPropagation();
-    morePopover.classList.remove("show");
-    toggleNoteVault(note.id);
-  };
-  morePopover.appendChild(vaultItem);
-
-  // Duplicate
-  const dupItem = document.createElement("button");
-  dupItem.className = "card-more-item";
-  dupItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg><span>Duplicate</span>`;
-  dupItem.onclick = (e) => {
-    e.stopPropagation();
-    morePopover.classList.remove("show");
-    duplicateNote(note.id);
-  };
-  morePopover.appendChild(dupItem);
-
-  // Divider
-  const moreDivider = document.createElement("div");
-  moreDivider.className = "card-more-divider";
-  morePopover.appendChild(moreDivider);
-
-  // Delete / Restore
-  const delItem = document.createElement("button");
-  delItem.className = "card-more-item";
   if (note.is_trash) {
-    delItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z"/></svg><span>Restore</span>`;
-    delItem.onclick = (e) => {
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "btn-icon";
+    restoreBtn.title = "Restore note";
+    restoreBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z"/></svg>`;
+    restoreBtn.onclick = (e) => {
       e.stopPropagation();
-      morePopover.classList.remove("show");
       restoreNote(note.id);
     };
+    actionsBar.appendChild(restoreBtn);
+
+    const delForeverBtn = document.createElement("button");
+    delForeverBtn.className = "btn-icon";
+    delForeverBtn.title = "Delete forever";
+    delForeverBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+    delForeverBtn.onclick = (e) => {
+      e.stopPropagation();
+      deleteForeverNote(note.id);
+    };
+    actionsBar.appendChild(delForeverBtn);
   } else {
+    actionsBar.appendChild(colorWrap);
+
+    // 2. Archive / Unarchive
+    const archBtn = document.createElement("button");
+    archBtn.className = "btn-icon";
+    archBtn.title = note.is_archived ? "Unarchive" : "Archive";
+    archBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM6.24 5h11.52l.83 1H5.42l.82-1zM5 19V8h14v11H5zm7-2l5-5h-3.5V9h-3v3H7l5 5z"/></svg>`;
+    archBtn.onclick = (e) => {
+      e.stopPropagation();
+      toggleNoteArchive(note.id, !note.is_archived);
+    };
+    actionsBar.appendChild(archBtn);
+
+    // 3. Open in Split Pane
+    const splitBtn = document.createElement("button");
+    splitBtn.className = "btn-icon";
+    splitBtn.title = "Open in Split Pane (or ⌘/Ctrl+Click)";
+    splitBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 16H5V5h6v14zm8 0h-6V5h6v14z"/></svg>`;
+    splitBtn.onclick = (e) => {
+      e.stopPropagation();
+      toggleSplitPane(note.id);
+    };
+    actionsBar.appendChild(splitBtn);
+
+    // 4. More (⋮) Overflow Menu
+    const moreWrap = document.createElement("div");
+    moreWrap.style.position = "relative";
+    const moreBtn = document.createElement("button");
+    moreBtn.className = "btn-icon";
+    moreBtn.title = "More";
+    moreBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>`;
+
+    const morePopover = document.createElement("div");
+    morePopover.className = "card-more-popover";
+
+    // Move to Workspace
+    const wsItem = document.createElement("button");
+    wsItem.className = "card-more-item";
+    wsItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg><span>Move to workspace</span>`;
+    wsItem.onclick = (e) => {
+      e.stopPropagation();
+      morePopover.classList.remove("show");
+      showMoveWorkspacePopover(note.id, moreBtn);
+    };
+    morePopover.appendChild(wsItem);
+
+    // Labels
+    const tagItem = document.createElement("button");
+    tagItem.className = "card-more-item";
+    tagItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16zM16 17H5V7h11l3.55 5L16 17z"/></svg><span>Labels</span>`;
+    tagItem.onclick = (e) => {
+      e.stopPropagation();
+      morePopover.classList.remove("show");
+      openTagPromptModal(async (tag) => {
+        if (!tag) return;
+        const curTags = new Set(note.tags || []);
+        curTags.add(tag);
+        await addTagToNote(note.id, Array.from(curTags));
+      });
+    };
+    morePopover.appendChild(tagItem);
+
+    // Persist on Disk (Shield)
+    const persistItem = document.createElement("button");
+    persistItem.className = "card-more-item";
+    persistItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg><span>${note.saved_to_disk ? "Remove from disk" : "Persist on disk (Shield)"}</span>`;
+    persistItem.onclick = (e) => {
+      e.stopPropagation();
+      morePopover.classList.remove("show");
+      togglePersistNote(note.id);
+    };
+    morePopover.appendChild(persistItem);
+
+    // Lock in Vault
+    const vaultItem = document.createElement("button");
+    vaultItem.className = "card-more-item";
+    vaultItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg><span>${note.is_vault ? "Unlock from vault" : "Lock in vault"}</span>`;
+    vaultItem.onclick = (e) => {
+      e.stopPropagation();
+      morePopover.classList.remove("show");
+      toggleNoteVault(note.id);
+    };
+    morePopover.appendChild(vaultItem);
+
+    // Duplicate
+    const dupItem = document.createElement("button");
+    dupItem.className = "card-more-item";
+    dupItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg><span>Duplicate</span>`;
+    dupItem.onclick = (e) => {
+      e.stopPropagation();
+      morePopover.classList.remove("show");
+      duplicateNote(note.id);
+    };
+    morePopover.appendChild(dupItem);
+
+    // Divider
+    const moreDivider = document.createElement("div");
+    moreDivider.className = "card-more-divider";
+    morePopover.appendChild(moreDivider);
+
+    // Delete
+    const delItem = document.createElement("button");
+    delItem.className = "card-more-item";
     delItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg><span>Delete</span>`;
     delItem.onclick = (e) => {
       e.stopPropagation();
       morePopover.classList.remove("show");
       trashNote(note.id);
     };
+    morePopover.appendChild(delItem);
+
+    moreBtn.onclick = (e) => {
+      e.stopPropagation();
+      document.querySelectorAll(".color-popover.show, .card-more-popover.show, .card-ws-popover").forEach((p) => {
+        if (p !== morePopover) p.classList.remove("show");
+      });
+      morePopover.classList.toggle("show");
+    };
+
+    moreWrap.appendChild(moreBtn);
+    moreWrap.appendChild(morePopover);
+    actionsBar.appendChild(moreWrap);
   }
-  morePopover.appendChild(delItem);
-
-  moreBtn.onclick = (e) => {
-    e.stopPropagation();
-    document.querySelectorAll(".color-popover.show, .card-more-popover.show, .card-ws-popover").forEach((p) => {
-      if (p !== morePopover) p.classList.remove("show");
-    });
-    morePopover.classList.toggle("show");
-  };
-
-  moreWrap.appendChild(moreBtn);
-  moreWrap.appendChild(morePopover);
-  actionsBar.appendChild(moreWrap);
 
   card.appendChild(actionsBar);
 
@@ -1250,6 +1268,12 @@ function createCardElement(note) {
   card.onclick = (e) => {
     // If user clicked inside an interactive button/link/checkbox, don't open modal
     if (e.target.closest("button, a, input, .card-select-btn, .color-popover, .card-actions, .card-top-tools, .workspace-popover")) {
+      return;
+    }
+    if (note.is_trash) {
+      showToast("Note is in Trash. Restore it to view or edit.", async () => {
+        await restoreNote(note.id);
+      });
       return;
     }
     if (e.metaKey || e.ctrlKey) {
@@ -1354,6 +1378,18 @@ function updateSelectionBar() {
     mainHeader.style.display = "none";
     selectionBar.classList.add("active");
     selCountText.textContent = `${count} selected`;
+
+    const isTrash = currentNavView === "trash";
+    if (batchRestoreBtn) batchRestoreBtn.style.display = isTrash ? "inline-flex" : "none";
+    if (batchTrashBtn) {
+      batchTrashBtn.title = isTrash ? "Delete selected forever" : "Move selected to Trash";
+    }
+    if (batchPinBtn) batchPinBtn.style.display = isTrash ? "none" : "inline-flex";
+    if (batchArchiveBtn) batchArchiveBtn.style.display = isTrash ? "none" : "inline-flex";
+    if (batchColorBtn) batchColorBtn.style.display = isTrash ? "none" : "inline-flex";
+    if (batchMergeBtn) batchMergeBtn.style.display = isTrash ? "none" : "inline-flex";
+    if (batchWorkspaceBtn) batchWorkspaceBtn.style.display = isTrash ? "none" : "inline-flex";
+    if (batchTagBtn) batchTagBtn.style.display = isTrash ? "none" : "inline-flex";
   } else {
     selectionBar.classList.remove("active");
     mainHeader.style.display = "flex";
@@ -1381,6 +1417,7 @@ async function executeBatchAction(action, payload = null) {
       showToast(`Batch ${action} completed`);
       clearSelection();
       await loadNotes();
+      await updateStats();
     } else {
       showToast("Batch action failed");
     }
@@ -1555,6 +1592,9 @@ async function openEditModal(noteId) {
   if (modalVaultBtn) {
     modalVaultBtn.classList.toggle("active", Boolean(note.is_vault));
     modalVaultBtn.title = note.is_vault ? "Unlock from Vault" : "Lock in Vault (Protected)";
+  }
+  if (modalTrashBtn) {
+    modalTrashBtn.title = (note.is_trash || note.trashed) ? "Delete forever" : "Move to Trash";
   }
 
   // Wire dropzone on modal editor card
@@ -2141,14 +2181,21 @@ function renderSplitWorkspace() {
     };
     footer.appendChild(splitArchBtn);
 
-    // 10. Delete Note
+    // 10. Delete Note / Delete Forever
     const splitTrashBtn = document.createElement("button");
     splitTrashBtn.className = "btn-icon";
-    splitTrashBtn.title = "Delete note";
-    splitTrashBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>`;
+    const isNoteTrashed = Boolean(note.is_trash || note.trashed);
+    splitTrashBtn.title = isNoteTrashed ? "Delete forever" : "Delete note";
+    splitTrashBtn.innerHTML = isNoteTrashed
+      ? `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`
+      : `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>`;
     splitTrashBtn.onclick = async (e) => {
       e.stopPropagation();
-      await trashNote(note.id);
+      if (isNoteTrashed) {
+        await deleteForeverNote(note.id);
+      } else {
+        await trashNote(note.id);
+      }
       closeSplitPane(note.id);
     };
     footer.appendChild(splitTrashBtn);
@@ -2619,7 +2666,7 @@ function normalizeNote(n) {
 // ── API Operations ─────────────────────────────────────────────────────────
 async function loadNotes(showLoading = true) {
   try {
-    const res = await fetch("/api/notes", { headers: vaultHeaders() });
+    const res = await fetch("/api/notes?view=all", { headers: vaultHeaders() });
     if (res.ok) {
       const raw = await res.json();
       allNotes = (Array.isArray(raw) ? raw : []).map(normalizeNote);
@@ -2633,15 +2680,30 @@ async function loadNotes(showLoading = true) {
 
 async function updateStats() {
   try {
-    const res = await fetch("/api/stats");
+    const res = await fetch("/api/stats", { headers: vaultHeaders() });
     if (res.ok) {
       const stats = await res.json();
-      ramUsageText.textContent = `${formatBytes(stats.ram_used)} RAM`;
+      const ramUsed = Number(stats.ram_used ?? stats.used ?? stats.ram_bytes ?? 0);
+      const ramTotal = Number(stats.ram_total ?? stats.total ?? 0);
+      const persistUsed = Number(stats.persist_used ?? stats.disk_used ?? stats.persist_bytes ?? 0);
+      const persistTotal = Number(stats.persist_total ?? stats.disk_total ?? 0);
+
+      if (ramUsageText) {
+        ramUsageText.textContent = `${formatBytes(ramUsed)} RAM`;
+      }
+      if (ramPill) {
+        const persistInfo = stats.persist_available
+          ? `\nDisk (/persist): ${formatBytes(persistUsed)}${persistTotal ? ` / ${formatBytes(persistTotal)}` : ""}`
+          : "\nDisk (/persist): Not mounted";
+        ramPill.title = `In RAM (/data tmpfs): ${formatBytes(ramUsed)}${ramTotal ? ` / ${formatBytes(ramTotal)}` : ""}${persistInfo}\nActive: ${stats.active_count || 0} | Trash: ${stats.trashed_count || 0}`;
+      }
     }
   } catch (err) {
     // ignore
   }
 }
+
+const fetchStats = updateStats;
 
 async function toggleNotePin(noteId, isPinned) {
   await fetch(`/api/notes/${noteId}`, {
@@ -2650,6 +2712,7 @@ async function toggleNotePin(noteId, isPinned) {
     body: JSON.stringify({ pinned: isPinned, is_pinned: isPinned }),
   });
   await loadNotes(false);
+  await updateStats();
 }
 
 async function updateNoteColor(noteId, color) {
@@ -2659,6 +2722,7 @@ async function updateNoteColor(noteId, color) {
     body: JSON.stringify({ color }),
   });
   await loadNotes(false);
+  await updateStats();
 }
 
 async function togglePersistNote(noteId) {
@@ -2670,6 +2734,7 @@ async function togglePersistNote(noteId) {
     const data = await res.json();
     showToast(data.saved_to_disk ? "Saved to persistent disk (/persist)" : "Removed from persistent disk");
     await loadNotes(false);
+    await updateStats();
   }
 }
 
@@ -2681,6 +2746,7 @@ async function bumpNote(noteId) {
   if (res.ok) {
     showToast("Bumped to top");
     await loadNotes(false);
+    await updateStats();
   }
 }
 
@@ -2695,6 +2761,7 @@ function snoozeNotePrompt(noteId) {
     }).then(() => {
       showToast(`Snoozed for ${hours} hours`);
       loadNotes(false);
+      updateStats();
     });
   }
 }
@@ -2707,33 +2774,80 @@ async function toggleNoteArchive(noteId, isArchived) {
   });
   showToast(isArchived ? "Note archived" : "Note unarchived");
   await loadNotes(false);
+  await updateStats();
 }
 
 async function trashNote(noteId) {
-  await fetch(`/api/notes/${noteId}`, {
-    method: "DELETE",
-    headers: vaultHeaders(),
-  });
-  showToast("Moved to Trash (7d auto-purge)", async () => {
-    await restoreNote(noteId);
-  });
-  await loadNotes(false);
+  try {
+    const res = await fetch(`/api/notes/${noteId}`, {
+      method: "DELETE",
+      headers: vaultHeaders(),
+    });
+    if (res.ok) {
+      showToast("Moved to Trash (7d auto-purge)", async () => {
+        await restoreNote(noteId);
+      });
+      await loadNotes(false);
+      await updateStats();
+    } else {
+      showToast("Failed to move note to Trash");
+    }
+  } catch (err) {
+    showToast("Error moving note to Trash");
+  }
 }
 
 async function restoreNote(noteId) {
-  await fetch(`/api/notes/${noteId}/restore`, {
-    method: "POST",
-    headers: vaultHeaders(),
-  });
-  showToast("Note restored");
-  await loadNotes(false);
+  try {
+    const res = await fetch(`/api/notes/${noteId}/restore`, {
+      method: "POST",
+      headers: vaultHeaders(),
+    });
+    if (res.ok) {
+      showToast("Note restored from Trash");
+      await loadNotes(false);
+      await updateStats();
+    } else {
+      showToast("Failed to restore note");
+    }
+  } catch (err) {
+    showToast("Error restoring note");
+  }
+}
+
+async function deleteForeverNote(noteId) {
+  if (!confirm("Permanently delete this note? This cannot be undone.")) return;
+  try {
+    const res = await fetch(`/api/notes/${noteId}?forever=true`, {
+      method: "DELETE",
+      headers: vaultHeaders(),
+    });
+    if (res.ok) {
+      showToast("Note permanently deleted");
+      await loadNotes(false);
+      await updateStats();
+    } else {
+      showToast("Failed to delete note");
+    }
+  } catch (err) {
+    showToast("Error deleting note");
+  }
 }
 
 async function emptyTrash() {
   if (!confirm("Permanently delete all notes in Trash? This cannot be undone.")) return;
-  await fetch("/api/trash/empty", { method: "POST", headers: vaultHeaders() });
-  showToast("Trash emptied");
-  await loadNotes(false);
+  try {
+    const res = await fetch("/api/trash", { method: "DELETE", headers: vaultHeaders() });
+    if (res.ok) {
+      showToast("Trash emptied");
+      await loadNotes(false);
+      await updateStats();
+    } else {
+      showToast("Failed to empty Trash");
+    }
+  } catch (err) {
+    showToast("Error emptying Trash");
+  }
 }
 
 async function saveChecklistUpdate(noteId, checklist) {
@@ -2743,6 +2857,7 @@ async function saveChecklistUpdate(noteId, checklist) {
     body: JSON.stringify({ checklist }),
   });
   await loadNotes(false);
+  await updateStats();
 }
 
 async function uploadFilesToNote(noteId, files) {
@@ -2755,6 +2870,7 @@ async function uploadFilesToNote(noteId, files) {
   });
   showToast("Attachments uploaded");
   await loadNotes(false);
+  await updateStats();
 }
 
 async function deleteAttachment(noteId, attachmentId) {
@@ -2764,6 +2880,7 @@ async function deleteAttachment(noteId, attachmentId) {
   });
   showToast("Attachment removed");
   await loadNotes(false);
+  await updateStats();
   const updated = allNotes.find((n) => n.id === noteId);
   if (updated) renderModalAttachments(updated.attachments || []);
 }
@@ -2968,7 +3085,18 @@ function setupEventListeners() {
     window.location.href = `/api/notes/export?ids=${ids.join(",")}`;
     clearSelection();
   };
-  batchTrashBtn.onclick = () => executeBatchAction("trash");
+  batchTrashBtn.onclick = () => {
+    if (currentNavView === "trash") {
+      if (confirm("Permanently delete selected notes? This cannot be undone.")) {
+        executeBatchAction("delete_forever");
+      }
+    } else {
+      executeBatchAction("trash");
+    }
+  };
+  if (batchRestoreBtn) {
+    batchRestoreBtn.onclick = () => executeBatchAction("restore");
+  }
 
   batchColorBtn.onclick = (e) => {
     e.stopPropagation();
@@ -3411,7 +3539,12 @@ function setupEventListeners() {
 
   modalTrashBtn.onclick = async () => {
     if (!currentEditingNoteId) return;
-    await trashNote(currentEditingNoteId);
+    const note = allNotes.find((n) => n.id === currentEditingNoteId);
+    if (note && (note.is_trash || note.trashed)) {
+      await deleteForeverNote(currentEditingNoteId);
+    } else {
+      await trashNote(currentEditingNoteId);
+    }
     closeEditModal();
   };
 

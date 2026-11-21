@@ -579,7 +579,7 @@ async def prune_expired_and_trash():
         for note in notes:
             should_purge = False
             # 1. 7-day Trash Auto-Purge
-            if note.get("trashed"):
+            if note.get("trashed") or note.get("is_trash"):
                 deleted_at = note.get("deleted_at") or 0
                 if now - deleted_at >= SEVEN_DAYS_MS:
                     should_purge = True
@@ -736,9 +736,9 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
     vault_ok = _validate_vault_token(x_vault_token)
     notes_in_view = [n for n in all_notes if not n.get("is_vault") or vault_ok]
 
-    active_count = len([n for n in notes_in_view if not n.get("trashed") and not n.get("archived")])
-    archived_count = len([n for n in notes_in_view if n.get("archived") and not n.get("trashed")])
-    trashed_count = len([n for n in notes_in_view if n.get("trashed")])
+    active_count = len([n for n in notes_in_view if not (n.get("trashed") or n.get("is_trash")) and not (n.get("archived") or n.get("is_archived"))])
+    archived_count = len([n for n in notes_in_view if (n.get("archived") or n.get("is_archived")) and not (n.get("trashed") or n.get("is_trash"))])
+    trashed_count = len([n for n in notes_in_view if (n.get("trashed") or n.get("is_trash"))])
     vault_count = len([n for n in all_notes if n.get("is_vault")])
     persist_count = len([n for n in all_notes if n.get("saved_to_disk")])
 
@@ -749,17 +749,76 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
             total_files_bytes += att.get("size", 0)
             total_files_count += 1
 
+    # Measure RAM tmpfs (/data) storage
+    ram_total = 0
+    ram_used = 0
+    ram_free = 0
+    data_bytes = 0
+    try:
+        if os.path.exists(DATA_DIR):
+            usage = shutil.disk_usage(DATA_DIR)
+            ram_total = usage.total
+            ram_used = usage.used
+            ram_free = usage.free
+            for root, dirs, files in os.walk(DATA_DIR):
+                for f in files:
+                    try:
+                        data_bytes += os.path.getsize(os.path.join(root, f))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    if ram_used == 0 and data_bytes > 0:
+        ram_used = data_bytes
+
+    # Measure persistent disk (/persist) storage
+    persist_total = 0
+    persist_used = 0
+    persist_free = 0
+    persist_bytes = 0
+    if is_persist_available():
+        try:
+            if os.path.exists(PERSIST_DIR):
+                p_usage = shutil.disk_usage(PERSIST_DIR)
+                persist_total = p_usage.total
+                persist_used = p_usage.used
+                persist_free = p_usage.free
+                for root, dirs, files in os.walk(PERSIST_DIR):
+                    for f in files:
+                        try:
+                            persist_bytes += os.path.getsize(os.path.join(root, f))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     return {
+        "ram_used": ram_used,
+        "ram_total": ram_total,
+        "ram_free": ram_free,
+        "ram_bytes": data_bytes,
+        "ram_percent": round((ram_used / ram_total * 100), 1) if ram_total > 0 else 0.0,
+        "persist_used": persist_used,
+        "persist_total": persist_total,
+        "persist_free": persist_free,
+        "persist_bytes": persist_bytes,
+        "persist_available": is_persist_available(),
         "active_count": active_count,
         "archived_count": archived_count,
         "trashed_count": trashed_count,
         "vault_count": vault_count,
         "persist_count": persist_count,
-        "persist_available": is_persist_available(),
         "total_notes": len(all_notes),
         "total_files_count": total_files_count,
         "total_files_bytes": total_files_bytes,
-        "storage_dir": DATA_DIR
+        "storage_dir": DATA_DIR,
+        # Backward-compatible aliases
+        "used": ram_used,
+        "total": ram_total,
+        "free": ram_free,
+        "disk_used": persist_used,
+        "disk_total": persist_total
     }
 
 
@@ -800,12 +859,12 @@ async def events_stream(request: Request):
 
 @app.get("/api/notes")
 async def get_notes(
-    view: str = Query("notes"),
+    view: Optional[str] = Query(None),
     x_view: Optional[str] = Header(default=None),
     x_vault_token: Optional[str] = Header(default=None)
 ):
-    """Retrieve notes filtered by view."""
-    active_view = x_view or view or "notes"
+    """Retrieve notes. If no view filter is specified or view='all', returns all notes (respecting vault authentication)."""
+    active_view = x_view or view or "all"
     vault_ok = _validate_vault_token(x_vault_token)
 
     async with notes_lock:
@@ -814,16 +873,22 @@ async def get_notes(
     if active_view == "vault":
         if not vault_ok:
             raise HTTPException(status_code=403, detail="Vault password authentication required.")
-        filtered = [n for n in all_notes if n.get("is_vault") and not n.get("trashed")]
+        filtered = [n for n in all_notes if n.get("is_vault") and not (n.get("trashed") or n.get("is_trash"))]
     elif active_view == "archive":
-        filtered = [n for n in all_notes if n.get("archived") and not n.get("trashed") and not n.get("is_vault")]
+        filtered = [n for n in all_notes if (n.get("archived") or n.get("is_archived")) and not (n.get("trashed") or n.get("is_trash")) and (not n.get("is_vault") or vault_ok)]
     elif active_view == "trash":
-        filtered = [n for n in all_notes if n.get("trashed") and not n.get("is_vault")]
+        filtered = [n for n in all_notes if (n.get("trashed") or n.get("is_trash")) and (not n.get("is_vault") or vault_ok)]
+    elif active_view == "notes":
+        filtered = [n for n in all_notes if not (n.get("archived") or n.get("is_archived")) and not (n.get("trashed") or n.get("is_trash")) and not n.get("is_vault")]
     else:
-        filtered = [n for n in all_notes if not n.get("archived") and not n.get("trashed") and not n.get("is_vault")]
+        # Default / "all": return all notes. Vault notes are included if unlocked, or excluded if locked.
+        if vault_ok:
+            filtered = list(all_notes)
+        else:
+            filtered = [n for n in all_notes if not n.get("is_vault")]
 
     def sort_key(note):
-        pinned = not bool(note.get("pinned", False))
+        pinned = not bool(note.get("pinned", False) or note.get("is_pinned", False))
         order = note.get("sort_order", 0)
         sort_rank = order if order > 0 else 999999999
         updated = -int(note.get("updated_at", 0))
@@ -1163,8 +1228,10 @@ async def restore_note(
             raise HTTPException(status_code=403, detail="Vault authentication required.")
 
         target["trashed"] = False
+        target["is_trash"] = False
         target["deleted_at"] = None
         target["archived"] = False
+        target["is_archived"] = False
         target["updated_at"] = int(time.time() * 1000)
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target)
@@ -1203,8 +1270,10 @@ async def delete_note(
             action_type = "deleted_forever"
         else:
             target["trashed"] = True
+            target["is_trash"] = True
             target["deleted_at"] = now
             target["pinned"] = False
+            target["is_pinned"] = False
             target["updated_at"] = now
             _atomic_write(NOTES_FILE, notes)
             mirror_note_to_persist(target)
@@ -1215,6 +1284,8 @@ async def delete_note(
 
 
 @app.delete("/api/trash")
+@app.post("/api/trash/empty")
+@app.delete("/api/trash/empty")
 async def empty_trash(x_vault_token: Optional[str] = Header(default=None)):
     """Permanently delete all notes in Trash and reclaim tmpfs RAM."""
     vault_ok = _validate_vault_token(x_vault_token)
@@ -1224,7 +1295,7 @@ async def empty_trash(x_vault_token: Optional[str] = Header(default=None)):
         purged_count = 0
 
         for n in notes:
-            if n.get("trashed"):
+            if n.get("trashed") or n.get("is_trash"):
                 if n.get("is_vault") and not vault_ok:
                     kept_notes.append(n)
                     continue
@@ -1298,15 +1369,19 @@ async def batch_action(
         elif req.action == "trash":
             for n in matching:
                 n["trashed"] = True
+                n["is_trash"] = True
                 n["deleted_at"] = now
                 n["pinned"] = False
+                n["is_pinned"] = False
                 n["updated_at"] = now
                 mirror_note_to_persist(n)
         elif req.action == "restore":
             for n in matching:
                 n["trashed"] = False
+                n["is_trash"] = False
                 n["deleted_at"] = None
                 n["archived"] = False
+                n["is_archived"] = False
                 n["updated_at"] = now
                 mirror_note_to_persist(n)
         elif req.action == "delete_forever":
