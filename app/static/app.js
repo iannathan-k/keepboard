@@ -24,10 +24,39 @@ import {
   setupGlobalPaste,
   setupGlobalDragDrop,
   setupCardDropzone,
-  VoiceMemoRecorder,
   createQRCodeSVG,
   initMedia,
 } from "./media.js";
+
+// ── Universal Clipboard Copy Helper with HTTP/Insecure Context Fallback ──────
+export async function copyToClipboard(text) {
+  if (!text) return false;
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      // Fall through to fallback
+    }
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    ta.style.left = "-9999px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const successful = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return successful;
+  } catch (err) {
+    console.error("Failed to copy using fallback:", err);
+    return false;
+  }
+}
 
 // Prevent default browser file-drop behavior (navigation/preview) globally immediately on module load
 if (typeof window !== "undefined") {
@@ -116,8 +145,9 @@ let vaultConfigured = false;
 let vaultUnlocked = Boolean(vaultToken);
 
 let currentEditingNoteId = null;
-let openPanes = []; // Up to 4 notes open simultaneously side-by-side
-let activeVoiceRecorder = null;
+let modal2NoteId = null;
+let modal2ChecklistItems = [];
+let modal2SaveTimer = null;
 let currentTagCallback = null;
 let archivePeekFiles = [];
 let archivePeekAttachmentId = null;
@@ -221,10 +251,6 @@ const composerFmtToolbar = document.getElementById("composer-fmt-toolbar");
 const composerRichEditor = document.getElementById("composer-rich-editor");
 const composerRawTextarea = document.getElementById("composer-raw-textarea");
 const composerChecklistContainer = document.getElementById("composer-checklist-container");
-const composerVoiceBar = document.getElementById("composer-voice-bar");
-const composerVoiceTimer = document.getElementById("composer-voice-timer");
-const composerVoiceStopBtn = document.getElementById("composer-voice-stop-btn");
-const composerVoiceCancelBtn = document.getElementById("composer-voice-cancel-btn");
 const composerAttachmentsPreview = document.getElementById("composer-attachments-preview");
 const composerTagsPreview = document.getElementById("composer-tags-preview");
 
@@ -233,7 +259,6 @@ const composerRawToggleBtn = document.getElementById("composer-raw-toggle-btn");
 const composerColorBtn = document.getElementById("composer-color-btn");
 const composerColorPopover = document.getElementById("composer-color-popover");
 const composerChecklistToggleBtn = document.getElementById("composer-checklist-toggle-btn");
-const composerVoiceBtn = document.getElementById("composer-voice-btn");
 const composerAttachBtn = document.getElementById("composer-attach-btn");
 const composerPinBtn = document.getElementById("composer-pin-btn");
 const composerTagBtn = document.getElementById("composer-tag-btn");
@@ -261,6 +286,8 @@ const editModalCard = document.getElementById("edit-modal-card");
 const modalOutlineRail = document.getElementById("modal-outline-rail");
 const modalOutlineItems = document.getElementById("modal-outline-items");
 const modalOutlineToggleBtn = document.getElementById("modal-outline-toggle-btn");
+const modalBesideBtn = document.getElementById("modal-beside-btn");
+const modalHeaderCloseBtn = document.getElementById("modal-header-close-btn");
 const modalTitleInput = document.getElementById("modal-title-input");
 const modalPinBtn = document.getElementById("modal-pin-btn");
 const modalTagsContainer = document.getElementById("modal-tags-container");
@@ -275,11 +302,6 @@ const modalRawToggleBtn = document.getElementById("modal-raw-toggle-btn");
 const modalColorBtn = document.getElementById("modal-color-btn");
 const modalColorPopover = document.getElementById("modal-color-popover");
 const modalAttachBtn = document.getElementById("modal-attach-btn");
-const modalVoiceBtn = document.getElementById("modal-voice-btn");
-const modalVoiceBar = document.getElementById("modal-voice-bar");
-const modalVoiceTimer = document.getElementById("modal-voice-timer");
-const modalVoiceCancelBtn = document.getElementById("modal-voice-cancel-btn");
-const modalVoiceDoneBtn = document.getElementById("modal-voice-done-btn");
 const modalShieldBtn = document.getElementById("modal-shield-btn");
 const modalVaultBtn = document.getElementById("modal-vault-btn");
 const modalTagBtn = document.getElementById("modal-tag-btn");
@@ -292,10 +314,19 @@ const modalArchiveBtn = document.getElementById("modal-archive-btn");
 const modalTrashBtn = document.getElementById("modal-trash-btn");
 const modalCloseBtn = document.getElementById("modal-close-btn");
 
-const splitWorkspaceModal = document.getElementById("split-workspace-modal");
-const splitPanesContainer = document.getElementById("split-panes-container");
-const splitCloseBtn = document.getElementById("split-close-btn");
-const splitCountBadge = document.getElementById("split-count-badge");
+// Side-by-Side Dual Note Secondary Pane
+const modalPanePrimary = document.getElementById("modal-pane-primary");
+const modalPaneSecondary = document.getElementById("modal-pane-secondary");
+const modal2CloseBtn = document.getElementById("modal2-close-btn");
+const modal2ChangeBtn = document.getElementById("modal2-change-btn");
+const modal2Picker = document.getElementById("modal2-picker");
+const modal2Search = document.getElementById("modal2-search");
+const modal2List = document.getElementById("modal2-list");
+const modal2Editor = document.getElementById("modal2-editor");
+const modal2TitleInput = document.getElementById("modal2-title-input");
+const modal2RichEditor = document.getElementById("modal2-rich-editor");
+const modal2ChecklistContainer = document.getElementById("modal2-checklist-container");
+const modal2AttachmentsList = document.getElementById("modal2-attachments-list");
 
 const cmdPaletteBackdrop = document.getElementById("cmd-palette-backdrop");
 const cmdPaletteInput = document.getElementById("cmd-palette-input");
@@ -481,42 +512,60 @@ function updateStorageBadge(badgeEl, isDisk) {
   }
 }
 
-// ── Live SSE Synchronization ───────────────────────────────────────────────
-function initLiveSync() {
-  let eventSource = null;
+// ── Lightweight Monotonic Cross-Device Auto-Sync (<30 bytes, 0.00% Idle CPU) ─
+let clientSyncRevision = null;
+let syncPollInterval = null;
 
-  function connect() {
-    try {
-      eventSource = new EventSource("/api/events");
-      eventSource.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data && data.event && data.event !== "ping") {
-            if (data.event === "workspaces_updated") {
-              loadWorkspaces();
-            }
-            loadNotes(false);
-            updateStats();
-          }
-        } catch (err) {
-          // ignore keepalive comments
+async function checkSync() {
+  if (document.hidden) return;
+  const isModalOpen = editModalBackdrop && editModalBackdrop.style.display === "flex";
+  const isComposerActive = captureExpanded && captureExpanded.style.display === "flex";
+
+  try {
+    const res = await fetch("/api/sync-token", { headers: vaultHeaders() });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.revision === "number") {
+      if (clientSyncRevision === null) {
+        clientSyncRevision = data.revision;
+      } else if (data.revision > clientSyncRevision) {
+        clientSyncRevision = data.revision;
+        // Re-fetch notes only if user is not actively editing inside modal or expanded composer
+        if (!isModalOpen && !isComposerActive) {
+          await loadNotes(false);
+          await updateStats();
         }
-      };
-      eventSource.onerror = () => {
-        if (eventSource) eventSource.close();
-        setTimeout(connect, 4000);
-      };
-    } catch (e) {
-      setTimeout(connect, 5000);
+      }
     }
+  } catch (err) {
+    // Ignore transient network blips
   }
+}
 
-  connect();
+function startAutoSync() {
+  stopAutoSync();
+  syncPollInterval = setInterval(checkSync, 5000);
+}
 
-  // Polling fallback to keep RAM stats and TTL notes updated
-  setInterval(() => {
-    updateStats();
-  }, 10000);
+function stopAutoSync() {
+  if (syncPollInterval) {
+    clearInterval(syncPollInterval);
+    syncPollInterval = null;
+  }
+}
+
+function initLiveSync() {
+  startAutoSync();
+
+  // Pause completely when tab is hidden to achieve 0.00% idle CPU; resume and check immediately on focus
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopAutoSync();
+    } else {
+      checkSync();
+      startAutoSync();
+    }
+  });
 }
 
 // ── Grid Density Switcher ──────────────────────────────────────────────────
@@ -843,7 +892,7 @@ function renderNotesGrid() {
   }
 }
 
-// ── Card Element Builder ───────────────────────────────────────────────────
+// ── Card Element Builder (Lightweight DOM with Event Delegation) ────────────
 function createCardElement(note) {
   const card = document.createElement("div");
   const pal = paletteFor(note.color);
@@ -863,10 +912,7 @@ function createCardElement(note) {
   const selectBtn = document.createElement("div");
   selectBtn.className = "card-select-btn";
   selectBtn.title = "Select note";
-  selectBtn.onclick = (e) => {
-    e.stopPropagation();
-    toggleCardSelection(note.id, e.shiftKey);
-  };
+  selectBtn.dataset.action = "select";
   card.appendChild(selectBtn);
 
   // Top Tools: Floating Quick Copy & Pin Button
@@ -877,27 +923,17 @@ function createCardElement(note) {
   const copyBtn = document.createElement("button");
   copyBtn.className = "btn-icon";
   copyBtn.title = "Copy note text";
+  copyBtn.dataset.action = "copy";
   copyBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>`;
-  copyBtn.onclick = (e) => {
-    e.stopPropagation();
-    const textToCopy = `${note.title ? note.title + "\n\n" : ""}${note.content || ""}`.trim();
-    if (textToCopy) {
-      navigator.clipboard.writeText(textToCopy);
-      showToast("Note copied to clipboard");
-    }
-  };
   topTools.appendChild(copyBtn);
 
   // Pin Button
   const pinBtn = document.createElement("button");
   pinBtn.className = "btn-icon";
   pinBtn.title = note.is_pinned ? "Unpin note" : "Pin note";
+  pinBtn.dataset.action = "pin";
   pinBtn.style.color = note.is_pinned ? "var(--accent)" : "inherit";
   pinBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>`;
-  pinBtn.onclick = (e) => {
-    e.stopPropagation();
-    toggleNotePin(note.id, !note.is_pinned);
-  };
   topTools.appendChild(pinBtn);
   card.appendChild(topTools);
 
@@ -932,12 +968,8 @@ function createCardElement(note) {
   // Show More / Show Less Toggle Button
   const expandBtn = document.createElement("button");
   expandBtn.className = "card-expand-btn";
+  expandBtn.dataset.action = "expand";
   expandBtn.textContent = "Show more";
-  expandBtn.onclick = (e) => {
-    e.stopPropagation();
-    const isExp = clampedWrapper.classList.toggle("expanded");
-    expandBtn.textContent = isExp ? "Show less" : "Show more";
-  };
   card.appendChild(expandBtn);
 
   // ── Tab / URL Parking Lot (If 2+ URLs present) ────────────────────────────
@@ -953,11 +985,8 @@ function createCardElement(note) {
 
       const openAllBtn = document.createElement("button");
       openAllBtn.className = "open-all-tabs-btn";
+      openAllBtn.dataset.action = "open-all-tabs";
       openAllBtn.textContent = "Open all in tabs";
-      openAllBtn.onclick = (e) => {
-        e.stopPropagation();
-        urlMatches.forEach((url) => window.open(url, "_blank"));
-      };
       parkingHeader.appendChild(openAllBtn);
       parkingLot.appendChild(parkingHeader);
 
@@ -997,56 +1026,56 @@ function createCardElement(note) {
 
     // Progress Bar
     const progress = calculateChecklistProgress(note.checklist);
-    const pBar = document.createElement("div");
-    pBar.className = "checklist-progress-bar";
-    pBar.innerHTML = `
-      <div class="checklist-progress-track">
-        <div class="checklist-progress-fill" style="width: ${progress.percent}%"></div>
-      </div>
-      <span class="checklist-progress-text">${progress.checked}/${progress.total}</span>
-    `;
-    checklistBox.appendChild(pBar);
+    if (progress) {
+      const pBar = document.createElement("div");
+      pBar.className = "checklist-progress-bar";
+      pBar.innerHTML = `
+        <div class="checklist-progress-track">
+          <div class="checklist-progress-fill" style="width: ${progress.percent}%"></div>
+        </div>
+        <span class="checklist-progress-text">${progress.checked}/${progress.total}</span>
+      `;
+      checklistBox.appendChild(pBar);
+    }
 
     // Checklist Tools (Uncheck all / Delete checked)
     const toolsMenu = document.createElement("div");
     toolsMenu.className = "checklist-tools-menu";
     const uncheckBtn = document.createElement("button");
     uncheckBtn.className = "checklist-tool-btn";
+    uncheckBtn.dataset.action = "uncheck-all";
     uncheckBtn.textContent = "Uncheck all";
-    uncheckBtn.onclick = (e) => {
-      e.stopPropagation();
-      const updated = uncheckAllItems(note.checklist);
-      saveChecklistUpdate(note.id, updated);
-    };
     toolsMenu.appendChild(uncheckBtn);
 
     const deleteCheckedBtn = document.createElement("button");
     deleteCheckedBtn.className = "checklist-tool-btn";
+    deleteCheckedBtn.dataset.action = "delete-checked";
     deleteCheckedBtn.textContent = "Delete checked";
-    deleteCheckedBtn.onclick = (e) => {
-      e.stopPropagation();
-      const updated = deleteCheckedItems(note.checklist);
-      saveChecklistUpdate(note.id, updated);
-    };
     toolsMenu.appendChild(deleteCheckedBtn);
     checklistBox.appendChild(toolsMenu);
 
-    // Checklist Items
+    // Checklist Items: Show active items first, then "+ N completed" count
     const listEl = document.createElement("div");
     listEl.className = "checklist-list";
+    let completedCount = 0;
+
     note.checklist.forEach((item, idx) => {
+      if (item.checked) {
+        completedCount++;
+        return;
+      }
       const itemEl = document.createElement("div");
-      itemEl.className = `checklist-item ${item.checked ? "checked" : ""} indent-${item.indent || 0}`;
+      itemEl.className = `checklist-item indent-${item.indent || 0}`;
+      if (item.indent) {
+        itemEl.style.paddingLeft = "20px";
+      }
 
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.className = "checklist-checkbox";
-      cb.checked = Boolean(item.checked);
-      cb.onclick = (e) => {
-        e.stopPropagation();
-        note.checklist[idx].checked = cb.checked;
-        saveChecklistUpdate(note.id, note.checklist);
-      };
+      cb.dataset.action = "toggle-check";
+      cb.dataset.index = idx;
+      cb.checked = false;
 
       const span = document.createElement("span");
       span.textContent = item.text;
@@ -1055,6 +1084,18 @@ function createCardElement(note) {
       itemEl.appendChild(span);
       listEl.appendChild(itemEl);
     });
+
+    if (completedCount > 0) {
+      const compSummary = document.createElement("div");
+      compSummary.className = "card-completed-count";
+      compSummary.style.fontSize = "11.5px";
+      compSummary.style.color = "var(--text-muted)";
+      compSummary.style.padding = "4px 0 2px 24px";
+      compSummary.style.fontStyle = "italic";
+      compSummary.textContent = `+ ${completedCount} completed ${completedCount === 1 ? "item" : "items"}`;
+      listEl.appendChild(compSummary);
+    }
+
     checklistBox.appendChild(listEl);
     card.appendChild(checklistBox);
   }
@@ -1117,10 +1158,9 @@ function createCardElement(note) {
         peekBtn.className = "attachment-action-btn";
         peekBtn.title = "Peek contents of ZIP";
         peekBtn.textContent = "Peek";
-        peekBtn.onclick = (e) => {
-          e.stopPropagation();
-          openArchivePeek(att.id, att.filename);
-        };
+        peekBtn.dataset.action = "peek-zip";
+        peekBtn.dataset.attId = att.id;
+        peekBtn.dataset.attName = att.filename;
         pill.appendChild(peekBtn);
       }
 
@@ -1129,13 +1169,9 @@ function createCardElement(note) {
       renameBtn.className = "attachment-action-btn";
       renameBtn.title = "Rename attachment";
       renameBtn.innerHTML = "✎";
-      renameBtn.onclick = async (e) => {
-        e.stopPropagation();
-        const newName = prompt("Rename attachment:", att.filename);
-        if (newName && newName.trim() && newName !== att.filename) {
-          await renameAttachment(note.id, att.id, newName.trim());
-        }
-      };
+      renameBtn.dataset.action = "rename-att";
+      renameBtn.dataset.attId = att.id;
+      renameBtn.dataset.attName = att.filename;
       pill.appendChild(renameBtn);
 
       attList.appendChild(pill);
@@ -1190,11 +1226,10 @@ function createCardElement(note) {
     note.tags.forEach((tag) => {
       const tagPill = document.createElement("span");
       tagPill.className = "card-tag-pill";
-      tagPill.textContent = tag.startsWith("#") ? tag : `#${tag}`;
-      tagPill.onclick = (e) => {
-        e.stopPropagation();
-        toggleSearchFlair(tagPill.textContent);
-      };
+      const tagText = tag.startsWith("#") ? tag : `#${tag}`;
+      tagPill.textContent = tagText;
+      tagPill.dataset.action = "filter-tag";
+      tagPill.dataset.tag = tagText;
       metaRow.appendChild(tagPill);
     });
   }
@@ -1203,7 +1238,7 @@ function createCardElement(note) {
     card.appendChild(metaRow);
   }
 
-  // ── Card Hover Actions Bar (Minimal: Color, Archive, Split, More ⋮) ─────
+  // ── Card Hover Actions Bar (Minimal: Color, Archive, Split, Trash, More ⋮) ─────
   const actionsBar = document.createElement("div");
   actionsBar.className = "card-actions";
 
@@ -1213,36 +1248,27 @@ function createCardElement(note) {
   const colorBtn = document.createElement("button");
   colorBtn.className = "btn-icon";
   colorBtn.title = "Change color";
+  colorBtn.dataset.action = "color-popover";
   colorBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c3.31 0 6-2.69 6-6 0-4.96-4.49-9-10-9zm-5.5 11c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-4C8.67 9 8 8.33 8 7.5S8.67 6 9.5 6s1.5.67 1.5 1.5S10.33 9 9.5 9zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 6 14.5 6s1.5.67 1.5 1.5S15.33 9 14.5 9zm3 4c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>`;
   const colorPopover = document.createElement("div");
   colorPopover.className = "color-popover";
   renderSwatches(colorPopover, (newColor) => updateNoteColor(note.id, newColor), note.color);
-  colorBtn.onclick = (e) => {
-    e.stopPropagation();
-    document.querySelectorAll(".card-more-popover.show, .card-ws-popover").forEach((p) => p.classList.remove("show"));
-    colorPopover.classList.toggle("show");
-  };
   colorWrap.appendChild(colorBtn);
   colorWrap.appendChild(colorPopover);
+
   if (note.is_trash) {
     const restoreBtn = document.createElement("button");
     restoreBtn.className = "btn-icon";
+    restoreBtn.dataset.action = "restore";
     restoreBtn.title = "Restore note";
     restoreBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 8l-4 4h3c0 3.31-2.69 6-6 6-1.01 0-1.97-.25-2.8-.7l-1.46 1.46C8.97 19.54 10.43 20 12 20c4.42 0 8-3.58 8-8h3l-4-4zM6 12c0-3.31 2.69-6 6-6 1.01 0 1.97.25 2.8.7l1.46-1.46C15.03 4.46 13.57 4 12 4c-4.42 0-8 3.58-8 8H1l4 4 4-4H6z"/></svg>`;
-    restoreBtn.onclick = (e) => {
-      e.stopPropagation();
-      restoreNote(note.id);
-    };
     actionsBar.appendChild(restoreBtn);
 
     const delForeverBtn = document.createElement("button");
     delForeverBtn.className = "btn-icon card-action-trash";
+    delForeverBtn.dataset.action = "delete-forever";
     delForeverBtn.title = "Delete forever";
     delForeverBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
-    delForeverBtn.onclick = (e) => {
-      e.stopPropagation();
-      deleteForeverNote(note.id);
-    };
     actionsBar.appendChild(delForeverBtn);
   } else {
     // 1. Color Palette
@@ -1251,34 +1277,25 @@ function createCardElement(note) {
     // 2. Archive / Unarchive
     const archBtn = document.createElement("button");
     archBtn.className = "btn-icon";
+    archBtn.dataset.action = "archive";
     archBtn.title = note.is_archived ? "Unarchive" : "Archive";
     archBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM6.24 5h11.52l.83 1H5.42l.82-1zM5 19V8h14v11H5zm7-2l5-5h-3.5V9h-3v3H7l5 5z"/></svg>`;
-    archBtn.onclick = (e) => {
-      e.stopPropagation();
-      toggleNoteArchive(note.id, !note.is_archived);
-    };
     actionsBar.appendChild(archBtn);
 
     // 3. Open in Split Pane
     const splitBtn = document.createElement("button");
     splitBtn.className = "btn-icon";
+    splitBtn.dataset.action = "split";
     splitBtn.title = "Open in Split Pane (or ⌘/Ctrl+Click)";
     splitBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-8 16H5V5h6v14zm8 0h-6V5h6v14z"/></svg>`;
-    splitBtn.onclick = (e) => {
-      e.stopPropagation();
-      toggleSplitPane(note.id);
-    };
     actionsBar.appendChild(splitBtn);
 
     // 4. Delete / Move to Trash
     const trashBtn = document.createElement("button");
     trashBtn.className = "btn-icon card-action-trash";
+    trashBtn.dataset.action = "trash";
     trashBtn.title = "Delete";
     trashBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>`;
-    trashBtn.onclick = (e) => {
-      e.stopPropagation();
-      trashNote(note.id);
-    };
     actionsBar.appendChild(trashBtn);
 
     // 5. More (⋮) Overflow Menu
@@ -1286,6 +1303,7 @@ function createCardElement(note) {
     moreWrap.style.position = "relative";
     const moreBtn = document.createElement("button");
     moreBtn.className = "btn-icon";
+    moreBtn.dataset.action = "more-popover";
     moreBtn.title = "More";
     moreBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/></svg>`;
 
@@ -1295,81 +1313,44 @@ function createCardElement(note) {
     // Move to Workspace
     const wsItem = document.createElement("button");
     wsItem.className = "card-more-item";
+    wsItem.dataset.action = "move-ws";
     wsItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg><span>Move to workspace</span>`;
-    wsItem.onclick = (e) => {
-      e.stopPropagation();
-      morePopover.classList.remove("show");
-      showMoveWorkspacePopover(note.id, moreBtn);
-    };
     morePopover.appendChild(wsItem);
 
     // Labels
     const tagItem = document.createElement("button");
     tagItem.className = "card-more-item";
+    tagItem.dataset.action = "labels";
     tagItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16zM16 17H5V7h11l3.55 5L16 17z"/></svg><span>Labels</span>`;
-    tagItem.onclick = (e) => {
-      e.stopPropagation();
-      morePopover.classList.remove("show");
-      openTagPromptModal(async (tag) => {
-        if (!tag) return;
-        const curTags = new Set(note.tags || []);
-        curTags.add(tag);
-        await addTagToNote(note.id, Array.from(curTags));
-      });
-    };
     morePopover.appendChild(tagItem);
 
     // Persist on Disk (Shield)
     const persistItem = document.createElement("button");
     persistItem.className = "card-more-item";
+    persistItem.dataset.action = "persist";
     persistItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg><span>${note.saved_to_disk ? "Remove from disk" : "Persist on disk (Shield)"}</span>`;
-    persistItem.onclick = (e) => {
-      e.stopPropagation();
-      morePopover.classList.remove("show");
-      togglePersistNote(note.id);
-    };
     morePopover.appendChild(persistItem);
 
     // Lock in Vault
     const vaultItem = document.createElement("button");
     vaultItem.className = "card-more-item";
+    vaultItem.dataset.action = "vault";
     vaultItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg><span>${note.is_vault ? "Unlock from vault" : "Lock in vault"}</span>`;
-    vaultItem.onclick = (e) => {
-      e.stopPropagation();
-      morePopover.classList.remove("show");
-      toggleNoteVault(note.id);
-    };
     morePopover.appendChild(vaultItem);
 
     // Duplicate
     const dupItem = document.createElement("button");
     dupItem.className = "card-more-item";
+    dupItem.dataset.action = "duplicate";
     dupItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg><span>Duplicate</span>`;
-    dupItem.onclick = (e) => {
-      e.stopPropagation();
-      morePopover.classList.remove("show");
-      duplicateNote(note.id);
-    };
     morePopover.appendChild(dupItem);
 
     // Export Markdown (.md)
     const exportItem = document.createElement("button");
     exportItem.className = "card-more-item";
+    exportItem.dataset.action = "export-md";
     exportItem.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg><span>Export Markdown (.md)</span>`;
-    exportItem.onclick = (e) => {
-      e.stopPropagation();
-      morePopover.classList.remove("show");
-      exportNoteMarkdown(note);
-    };
     morePopover.appendChild(exportItem);
-
-    moreBtn.onclick = (e) => {
-      e.stopPropagation();
-      document.querySelectorAll(".color-popover.show, .card-more-popover.show, .card-ws-popover").forEach((p) => {
-        if (p !== morePopover) p.classList.remove("show");
-      });
-      morePopover.classList.toggle("show");
-    };
 
     moreWrap.appendChild(moreBtn);
     moreWrap.appendChild(morePopover);
@@ -1377,27 +1358,6 @@ function createCardElement(note) {
   }
 
   card.appendChild(actionsBar);
-
-  // Open note edit modal on card click (or toggle in split workspace if meta/ctrl clicked)
-  card.onclick = (e) => {
-    // If user clicked inside an interactive button/link/checkbox, don't open modal
-    if (e.target.closest("button, a, input, .card-select-btn, .color-popover, .card-actions, .card-top-tools, .workspace-popover")) {
-      return;
-    }
-    if (note.is_trash) {
-      showToast("Note is in Trash. Restore it to view or edit.", async () => {
-        await restoreNote(note.id);
-      });
-      return;
-    }
-    if (e.metaKey || e.ctrlKey) {
-      e.preventDefault();
-      toggleSplitPane(note.id);
-      return;
-    }
-    openEditModal(note.id);
-  };
-
   return card;
 }
 
@@ -1430,7 +1390,7 @@ function renderFormattedCardContent(container, contentText) {
     copyBtn.textContent = "Copy";
     copyBtn.onclick = (e) => {
       e.stopPropagation();
-      navigator.clipboard.writeText(codeBody);
+      copyToClipboard(codeBody);
       copyBtn.textContent = "Copied!";
       setTimeout(() => (copyBtn.textContent = "Copy"), 2000);
     };
@@ -1475,15 +1435,19 @@ function linkifyAndFormat(rawText) {
   return escaped;
 }
 
-// ── Multi-Select Batch Actions ─────────────────────────────────────────────
+// ── Multi-Select Batch Actions (Direct DOM Mutation) ──────────────────────
 function toggleCardSelection(noteId, isShift = false) {
-  if (selectedNoteIds.has(noteId)) {
+  const isSelected = selectedNoteIds.has(noteId);
+  if (isSelected) {
     selectedNoteIds.delete(noteId);
   } else {
     selectedNoteIds.add(noteId);
   }
+  const card = document.querySelector(`.card[data-id="${noteId}"]`);
+  if (card) {
+    card.classList.toggle("selected", !isSelected);
+  }
   updateSelectionBar();
-  renderNotesGrid();
 }
 
 function updateSelectionBar() {
@@ -1526,8 +1490,8 @@ function updateSelectionBar() {
 
 function clearSelection() {
   selectedNoteIds.clear();
+  document.querySelectorAll(".card.selected").forEach((c) => c.classList.remove("selected"));
   updateSelectionBar();
-  renderNotesGrid();
 }
 
 function selectAllNotes() {
@@ -1537,8 +1501,8 @@ function selectAllNotes() {
     clearSelection();
   } else {
     visible.forEach((n) => selectedNoteIds.add(n.id));
+    document.querySelectorAll(".card").forEach((c) => c.classList.add("selected"));
     updateSelectionBar();
-    renderNotesGrid();
   }
 }
 
@@ -1595,11 +1559,7 @@ function collapseComposer() {
   captureBox.style.backgroundColor = paletteFor("default");
   renderComposerPendingFiles();
   renderComposerTags();
-  if (activeVoiceRecorder) {
-    activeVoiceRecorder.cancel();
-    activeVoiceRecorder = null;
-    composerVoiceBar.style.display = "none";
-  }
+
 }
 
 function renderComposerPendingFiles() {
@@ -1756,12 +1716,20 @@ async function openEditModal(noteId) {
 
   if (note.is_checklist && modalChecklistItems.length > 0) {
     modalChecklistContainer.style.display = "block";
+    modalRichEditor.style.display = "none";
+    modalRawTextarea.style.display = "none";
     renderChecklistEditor(modalChecklistContainer, modalChecklistItems, (updated) => {
       modalChecklistItems = updated;
     });
   } else {
     modalChecklistContainer.style.display = "none";
+    modalRichEditor.style.display = "block";
   }
+
+  // Reset side-by-side secondary pane state when opening modal
+  modal2NoteId = null;
+  if (modalPaneSecondary) modalPaneSecondary.style.display = "none";
+  if (editModalCard) editModalCard.classList.remove("side-by-side");
 
   // Update Document Outline Rail
   extractDocumentOutline(modalRichEditor, modalOutlineItems);
@@ -1807,7 +1775,13 @@ function renderModalAttachments(attachments) {
 async function closeEditModal() {
   if (!currentEditingNoteId) {
     editModalBackdrop.style.display = "none";
+    closeSideBySideMode();
     return;
+  }
+
+  // Save side-by-side note if open
+  if (modal2NoteId) {
+    await saveSecondNote();
   }
 
   const title = modalTitleInput.value.trim();
@@ -1842,6 +1816,7 @@ async function closeEditModal() {
     if (res.ok) {
       editModalBackdrop.style.display = "none";
       currentEditingNoteId = null;
+      closeSideBySideMode();
       await loadNotes();
     }
   } catch (err) {
@@ -1849,517 +1824,150 @@ async function closeEditModal() {
   }
 }
 
-// ── Multi-Pane Split Workspace (2–4 Notes) ──────────────────────────────────
+// ── Side-by-Side Dual Note Mode ─────────────────────────────────────────────
 function openInSplitWorkspace(noteId) {
-  toggleSplitPane(noteId);
-}
-
-function toggleSplitPane(noteId) {
   if (editModalBackdrop.style.display === "flex") {
-    editModalBackdrop.style.display = "none";
-    currentEditingNoteId = null;
-  }
-
-  const existingIdx = openPanes.indexOf(noteId);
-  if (existingIdx !== -1) {
-    const paneEl = splitPanesContainer.querySelector(`[data-note-id="${noteId}"]`);
-    if (paneEl) {
-      paneEl.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
-      paneEl.classList.remove("split-pane-highlight");
-      void paneEl.offsetWidth;
-      paneEl.classList.add("split-pane-highlight");
-      setTimeout(() => paneEl.classList.remove("split-pane-highlight"), 1600);
-      const focusTarget = paneEl.querySelector(".split-title-input") || paneEl.querySelector(".split-rich-editor");
-      if (focusTarget) focusTarget.focus();
-    }
-    return;
-  }
-
-  if (openPanes.length >= 4) {
-    showToast("Maximum 4 split panes can be open simultaneously");
-    return;
-  }
-
-  openPanes.push(noteId);
-  renderSplitWorkspace();
-}
-
-function closeSplitPane(noteId) {
-  openPanes = openPanes.filter((id) => id !== noteId);
-  if (openPanes.length === 0) {
-    splitWorkspaceModal.style.display = "none";
-    if (splitCountBadge) splitCountBadge.textContent = "0 active";
-  } else {
-    renderSplitWorkspace();
-  }
-}
-
-function closeAllSplitPanes() {
-  openPanes = [];
-  splitWorkspaceModal.style.display = "none";
-  if (splitCountBadge) splitCountBadge.textContent = "0 active";
-}
-
-function renderSplitWorkspace() {
-  if (openPanes.length === 0) {
-    splitWorkspaceModal.style.display = "none";
-    if (splitCountBadge) splitCountBadge.textContent = "0 active";
-    return;
-  }
-
-  splitWorkspaceModal.style.display = "flex";
-  if (splitCountBadge) {
-    splitCountBadge.textContent = `${openPanes.length}/4 active`;
-  }
-
-  splitPanesContainer.innerHTML = "";
-
-  openPanes.forEach((id) => {
-    const note = allNotes.find((n) => n.id === id);
-    if (!note) return;
-
-    const pane = document.createElement("div");
-    const sPal = paletteFor(note.color);
-    pane.className = `split-pane note-color-${sPal.name}`;
-    pane.dataset.noteId = note.id;
-    pane.style.backgroundColor = sPal.bg;
-    pane.style.borderColor = sPal.border;
-
-    // Wire dropzone on split pane
-    setupCardDropzone(pane, note.id, {
-      onAttachmentsUploaded: () => {
-        loadNotes(false);
-        renderSplitWorkspace();
-      },
-      showToast,
-      vaultHeaders,
-    });
-
-    // Header
-    const header = document.createElement("div");
-    header.className = "split-pane-header";
-
-    const titleInput = document.createElement("input");
-    titleInput.className = "split-title-input";
-    titleInput.value = note.title || "";
-    titleInput.placeholder = "Untitled";
-
-    const tools = document.createElement("div");
-    tools.className = "split-pane-tools";
-
-    // Pin Button
-    const pinBtn = document.createElement("button");
-    pinBtn.className = `btn-icon ${note.is_pinned ? "active" : ""}`;
-    pinBtn.title = note.is_pinned ? "Unpin" : "Pin";
-    pinBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16 9V4l1 0c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1l1 0v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>`;
-    pinBtn.onclick = async () => {
-      const newPinned = !note.is_pinned;
-      note.is_pinned = newPinned;
-      note.pinned = newPinned;
-      pinBtn.classList.toggle("active", newPinned);
-      pinBtn.title = newPinned ? "Unpin" : "Pin";
-      await toggleNotePin(note.id, newPinned);
-      renderNotesGrid();
-    };
-    tools.appendChild(pinBtn);
-
-    // Close × Button
-    const closeBtn = document.createElement("button");
-    closeBtn.className = "btn-icon";
-    closeBtn.title = "Close pane";
-    closeBtn.textContent = "✕";
-    closeBtn.onclick = () => closeSplitPane(note.id);
-    tools.appendChild(closeBtn);
-
-    header.appendChild(titleInput);
-    header.appendChild(tools);
-    pane.appendChild(header);
-
-    // Body
-    const body = document.createElement("div");
-    body.className = "split-pane-body";
-
-    let editor = null;
-    let checklistItems = Array.isArray(note.checklist) ? [...note.checklist] : [];
-
-    let saveTimeout = null;
-    const debouncedSave = () => {
-      clearTimeout(saveTimeout);
-      saveTimeout = setTimeout(async () => {
-        const titleVal = titleInput.value.trim();
-        const contentVal = note.is_checklist ? "" : (editor ? editor.innerHTML.trim() : "");
-        note.title = titleVal;
-        if (!note.is_checklist) {
-          note.content = contentVal;
-          note.text = contentVal;
-        } else {
-          note.checklist = checklistItems;
-        }
-
-        const payload = {
-          title: titleVal,
-          content: contentVal,
-          text: contentVal,
-        };
-        if (note.is_checklist) {
-          payload.checklist = checklistItems;
-          payload.is_checklist = true;
-        }
-
-        await fetch(`/api/notes/${note.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", ...vaultHeaders() },
-          body: JSON.stringify(payload),
-        });
-
-        const cardEl = document.querySelector(`.note-card[data-id="${note.id}"]`);
-        if (cardEl) {
-          const cardTitle = cardEl.querySelector(".card-title");
-          if (cardTitle) cardTitle.textContent = titleVal || "";
-          const cardContent = cardEl.querySelector(".card-content");
-          if (cardContent && !note.is_checklist) cardContent.innerHTML = contentVal || "";
-        }
-      }, 600);
-    };
-
-    titleInput.addEventListener("input", debouncedSave);
-
-    if (note.is_checklist) {
-      const checkContainer = document.createElement("div");
-      checkContainer.className = "checklist-container";
-
-      const renderChecklist = () => {
-        checkContainer.innerHTML = "";
-        checklistItems.forEach((item, itemIdx) => {
-          const row = document.createElement("div");
-          row.className = "checklist-item-row";
-
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.checked = Boolean(item.checked);
-          cb.onchange = () => {
-            item.checked = cb.checked;
-            itemText.classList.toggle("checked", cb.checked);
-            debouncedSave();
-          };
-
-          const itemText = document.createElement("input");
-          itemText.type = "text";
-          itemText.className = `checklist-item-text ${item.checked ? "checked" : ""}`;
-          itemText.value = item.text || "";
-          itemText.oninput = () => {
-            item.text = itemText.value;
-            debouncedSave();
-          };
-
-          const delItemBtn = document.createElement("button");
-          delItemBtn.className = "btn-icon";
-          delItemBtn.textContent = "✕";
-          delItemBtn.onclick = () => {
-            checklistItems.splice(itemIdx, 1);
-            renderChecklist();
-            debouncedSave();
-          };
-
-          row.appendChild(cb);
-          row.appendChild(itemText);
-          row.appendChild(delItemBtn);
-          checkContainer.appendChild(row);
-        });
-
-        const addRow = document.createElement("div");
-        addRow.className = "checklist-item-row add-row";
-        const addInput = document.createElement("input");
-        addInput.type = "text";
-        addInput.className = "checklist-item-text";
-        addInput.placeholder = "+ Add item";
-        addInput.onkeydown = (e) => {
-          if (e.key === "Enter" && addInput.value.trim()) {
-            checklistItems.push({ text: addInput.value.trim(), checked: false });
-            renderChecklist();
-            debouncedSave();
-          }
-        };
-        addRow.appendChild(addInput);
-        checkContainer.appendChild(addRow);
-      };
-
-      renderChecklist();
-      body.appendChild(checkContainer);
+    if (currentEditingNoteId === noteId) {
+      if (editModalCard.classList.contains("side-by-side")) {
+        closeSideBySideMode();
+      } else {
+        openSideBySideMode();
+      }
     } else {
-      editor = document.createElement("div");
-      editor.className = "split-rich-editor";
-      editor.contentEditable = "true";
-      editor.innerHTML = note.content || "";
-      setupCleanPaste(editor);
-      setupInlineMath(editor);
-      setupSmartTyping(editor, () => {
-        if (splitChecklistBtn) splitChecklistBtn.click();
-      });
-      editor.addEventListener("input", debouncedSave);
-      body.appendChild(editor);
+      openSideBySideMode(noteId);
     }
+  } else {
+    openEditModal(noteId);
+    openSideBySideMode();
+  }
+}
 
-    if (note.attachments && note.attachments.length > 0) {
-      const attachDiv = document.createElement("div");
-      attachDiv.className = "attachment-list";
-      attachDiv.style.marginTop = "auto";
-      attachDiv.style.paddingTop = "8px";
-      note.attachments.forEach((att) => {
-        const pill = document.createElement("div");
-        pill.className = "attachment-pill";
-        pill.innerHTML = `
-          <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-          <a href="/api/files/${att.id}?download=true" class="attachment-name">${escapeHtml(att.filename)}</a>
-        `;
-        attachDiv.appendChild(pill);
-      });
-      body.appendChild(attachDiv);
-    }
+function openSideBySideMode(secondNoteId = null) {
+  if (!editModalCard || !modalPaneSecondary) return;
+  editModalCard.classList.add("side-by-side");
+  modalPaneSecondary.style.display = "flex";
 
-    pane.appendChild(body);
+  if (secondNoteId) {
+    loadSecondNote(secondNoteId);
+  } else {
+    showSecondNotePicker();
+  }
+}
 
-    // ── Split Pane Footer Toolbar (Full Controls) ───────────────────────────
-    const footer = document.createElement("div");
-    footer.className = "split-pane-footer";
+function closeSideBySideMode() {
+  if (modal2NoteId) {
+    saveSecondNote();
+  }
+  modal2NoteId = null;
+  if (modalPaneSecondary) modalPaneSecondary.style.display = "none";
+  if (editModalCard) editModalCard.classList.remove("side-by-side");
+}
 
-    // 1. Formatting Aa Toggle
-    const fmtBtn = document.createElement("button");
-    fmtBtn.className = "btn-icon";
-    fmtBtn.title = "Formatting (Bold / Italic)";
-    fmtBtn.innerHTML = `<span style="font-size:13px; font-weight:700;">Aa</span>`;
-    fmtBtn.onclick = (e) => {
-      e.stopPropagation();
-      document.execCommand("bold", false, null);
+function showSecondNotePicker() {
+  if (!modal2Picker || !modal2Editor) return;
+  modal2Picker.style.display = "flex";
+  modal2Editor.style.display = "none";
+  if (modal2ChangeBtn) modal2ChangeBtn.style.display = "none";
+  renderSecondNotePickerList(modal2Search ? modal2Search.value.trim() : "");
+  if (modal2Search) {
+    modal2Search.value = "";
+    modal2Search.focus();
+  }
+}
+
+function renderSecondNotePickerList(filter = "") {
+  if (!modal2List) return;
+  modal2List.innerHTML = "";
+  const curWs = currentWorkspaceId || "default";
+  const notes = allNotes.filter((n) => !n.is_trash && (n.workspace || "default") === curWs && n.id !== currentEditingNoteId);
+  const q = filter.toLowerCase();
+  const filtered = q
+    ? notes.filter((n) => (n.title || "").toLowerCase().includes(q) || (n.content || "").toLowerCase().includes(q))
+    : notes;
+
+  if (filtered.length === 0) {
+    modal2List.innerHTML = `<div style="font-size:12px; color:var(--text-muted); font-style:italic; padding:12px; text-align:center;">No other notes in this workspace</div>`;
+    return;
+  }
+
+  filtered.forEach((note) => {
+    const item = document.createElement("div");
+    item.className = "modal2-note-item";
+    const snippet = (note.content || "").replace(/<[^>]+>/g, "").slice(0, 90) || "(empty note)";
+    item.innerHTML = `
+      <div class="modal2-note-title">${escapeHtml(note.title || "Untitled")}</div>
+      <div class="modal2-note-snippet">${escapeHtml(snippet)}</div>
+    `;
+    item.onclick = () => {
+      loadSecondNote(note.id);
     };
-    footer.appendChild(fmtBtn);
-
-    // 2. Checklist Toggle
-    const checkToggleBtn = document.createElement("button");
-    checkToggleBtn.className = "btn-icon";
-    checkToggleBtn.title = "Toggle checklist";
-    checkToggleBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>`;
-    checkToggleBtn.onclick = async (e) => {
-      e.stopPropagation();
-      if (note.is_checklist) {
-        const text = convertChecklistToText(checklistItems);
-        note.is_checklist = false;
-        note.checklist = [];
-        note.content = text;
-        note.text = text;
-        await fetch(`/api/notes/${note.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", ...vaultHeaders() },
-          body: JSON.stringify({ is_checklist: false, checklist: [], text, content: text }),
-        });
-      } else {
-        const text = editor ? (editor.innerText || editor.textContent || "") : (note.content || "");
-        const items = convertTextToChecklist(text);
-        note.is_checklist = true;
-        note.checklist = items.length > 0 ? items : [{ text: "", checked: false }];
-        await fetch(`/api/notes/${note.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json", ...vaultHeaders() },
-          body: JSON.stringify({ is_checklist: true, checklist: note.checklist }),
-        });
-      }
-      renderSplitWorkspace();
-      renderNotesGrid();
-    };
-    footer.appendChild(checkToggleBtn);
-
-    // 3. Attach File Paperclip
-    const splitAttachBtn = document.createElement("button");
-    splitAttachBtn.className = "btn-icon";
-    splitAttachBtn.title = "Add attachment";
-    splitAttachBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>`;
-    splitAttachBtn.onclick = (e) => {
-      e.stopPropagation();
-      cardActionFileInput.onchange = async (ev) => {
-        ev.preventDefault();
-        if (cardActionFileInput.files && cardActionFileInput.files.length > 0) {
-          await uploadFilesToNote(note.id, Array.from(cardActionFileInput.files));
-          cardActionFileInput.value = "";
-          await loadNotes(false);
-          renderSplitWorkspace();
-        }
-      };
-      cardActionFileInput.click();
-    };
-    footer.appendChild(splitAttachBtn);
-
-    // 4. Voice Memo Recorder
-    const splitVoiceBtn = document.createElement("button");
-    splitVoiceBtn.className = "btn-icon";
-    splitVoiceBtn.title = "Record voice memo";
-    splitVoiceBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>`;
-    splitVoiceBtn.onclick = (e) => {
-      e.stopPropagation();
-      if (activeVoiceRecorder && activeVoiceRecorder.isRecording) {
-        activeVoiceRecorder.stop();
-        return;
-      }
-      activeVoiceRecorder = new VoiceMemoRecorder({
-        showToast,
-        onAudioReady: async (audioFile) => {
-          if (audioFile) {
-            await uploadFilesToNote(note.id, [audioFile]);
-            await loadNotes(false);
-            renderSplitWorkspace();
-          }
-        },
-      });
-      activeVoiceRecorder.start();
-    };
-    footer.appendChild(splitVoiceBtn);
-
-    // 5. Persist on Disk Shield
-    const splitStorageBadge = document.createElement("span");
-    updateStorageBadge(splitStorageBadge, Boolean(note.saved_to_disk));
-
-    const splitShieldBtn = document.createElement("button");
-    splitShieldBtn.className = `btn-icon ${note.saved_to_disk ? "active" : ""}`;
-    splitShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
-    splitShieldBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>`;
-    splitShieldBtn.onclick = async (e) => {
-      e.stopPropagation();
-      await togglePersistNote(note.id);
-      note.saved_to_disk = !note.saved_to_disk;
-      splitShieldBtn.classList.toggle("active", note.saved_to_disk);
-      splitShieldBtn.title = note.saved_to_disk ? "Remove from persistent disk" : "Save to persistent disk (/persist)";
-      updateStorageBadge(splitStorageBadge, note.saved_to_disk);
-    };
-    footer.appendChild(splitShieldBtn);
-
-    // 5b. Vault (Lock in Vault)
-    const splitVaultBtn = document.createElement("button");
-    splitVaultBtn.className = `btn-icon ${note.is_vault ? "active" : ""}`;
-    splitVaultBtn.title = note.is_vault ? "Unlock from Vault" : "Lock in Vault (Protected)";
-    splitVaultBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>`;
-    splitVaultBtn.onclick = async (e) => {
-      e.stopPropagation();
-      await toggleNoteVault(note.id);
-      renderSplitWorkspace();
-    };
-    footer.appendChild(splitVaultBtn);
-
-    // 6. Labels (#)
-    const splitTagBtn = document.createElement("button");
-    splitTagBtn.className = "btn-icon";
-    splitTagBtn.title = "Add label (#)";
-    splitTagBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16zM16 17H5V7h11l3.55 5L16 17z"/></svg>`;
-    splitTagBtn.onclick = (e) => {
-      e.stopPropagation();
-      openTagPromptModal(async (tag) => {
-        if (!tag) return;
-        const curTags = new Set(note.tags || []);
-        curTags.add(tag);
-        await addTagToNote(note.id, Array.from(curTags));
-        renderSplitWorkspace();
-      });
-    };
-    footer.appendChild(splitTagBtn);
-
-    // 7. Workspace Selector
-    const splitWsWrap = document.createElement("div");
-    splitWsWrap.style.position = "relative";
-    splitWsWrap.style.display = "inline-flex";
-    const splitWsBtn = document.createElement("button");
-    splitWsBtn.className = "btn-icon";
-    splitWsBtn.title = "Move to workspace";
-    splitWsBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>`;
-    const splitWsPopover = document.createElement("div");
-    splitWsPopover.className = "workspace-popover";
-    splitWsBtn.onclick = (e) => {
-      e.stopPropagation();
-      if (splitWsPopover.classList.contains("show")) {
-        splitWsPopover.classList.remove("show");
-        return;
-      }
-      splitWsPopover.innerHTML = "";
-      allWorkspaces.forEach((ws) => {
-        const item = document.createElement("button");
-        item.className = "workspace-item-row";
-        item.textContent = ws.name;
-        item.onclick = async (ev) => {
-          ev.stopPropagation();
-          splitWsPopover.classList.remove("show");
-          await moveNoteToWorkspace(note.id, ws.id);
-        };
-        splitWsPopover.appendChild(item);
-      });
-      splitWsPopover.classList.add("show");
-    };
-    splitWsWrap.appendChild(splitWsBtn);
-    splitWsWrap.appendChild(splitWsPopover);
-    footer.appendChild(splitWsWrap);
-
-    // 8. Color Palette
-    const splitColorWrap = document.createElement("div");
-    splitColorWrap.style.position = "relative";
-    splitColorWrap.style.display = "inline-flex";
-    const splitColorBtn = document.createElement("button");
-    splitColorBtn.className = "btn-icon";
-    splitColorBtn.title = "Change color";
-    splitColorBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c3.31 0 6-2.69 6-6 0-4.96-4.49-9-10-9zm-5.5 11c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-4C8.67 9 8 8.33 8 7.5S8.67 6 9.5 6s1.5.67 1.5 1.5S10.33 9 9.5 9zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 6 14.5 6s1.5.67 1.5 1.5S15.33 9 14.5 9zm3 4c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>`;
-    const splitColorPopover = document.createElement("div");
-    splitColorPopover.className = "color-popover";
-    renderSwatches(splitColorPopover, async (c) => {
-      note.color = c;
-      const newPal = paletteFor(c);
-      pane.style.backgroundColor = newPal.bg;
-      pane.style.borderColor = newPal.border;
-      pane.className = `split-pane note-color-${newPal.name}`;
-      await fetch(`/api/notes/${note.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...vaultHeaders() },
-        body: JSON.stringify({ color: c }),
-      });
-      renderNotesGrid();
-    }, note.color);
-    splitColorBtn.onclick = (e) => {
-      e.stopPropagation();
-      splitColorPopover.classList.toggle("show");
-    };
-    splitColorWrap.appendChild(splitColorBtn);
-    splitColorWrap.appendChild(splitColorPopover);
-    footer.appendChild(splitColorWrap);
-
-    // 9. Archive / Unarchive
-    const splitArchBtn = document.createElement("button");
-    splitArchBtn.className = "btn-icon";
-    splitArchBtn.title = note.is_archived ? "Unarchive" : "Archive";
-    splitArchBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM6.24 5h11.52l.83 1H5.42l.82-1zM5 19V8h14v11H5zm7-2l5-5h-3.5V9h-3v3H7l5 5z"/></svg>`;
-    splitArchBtn.onclick = async (e) => {
-      e.stopPropagation();
-      await toggleNoteArchive(note.id, !note.is_archived);
-      closeSplitPane(note.id);
-    };
-    footer.appendChild(splitArchBtn);
-
-    // 10. Delete Note / Delete Forever
-    const splitTrashBtn = document.createElement("button");
-    splitTrashBtn.className = "btn-icon";
-    const isNoteTrashed = Boolean(note.is_trash || note.trashed);
-    splitTrashBtn.title = isNoteTrashed ? "Delete forever" : "Delete note";
-    splitTrashBtn.innerHTML = isNoteTrashed
-      ? `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`
-      : `<svg viewBox="0 0 24 24"><path d="M16 9v10H8V9h8m-1.5-6h-5l-1 1H5v2h14V4h-3.5l-1-1zM18 7H6v12c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7z"/></svg>`;
-    splitTrashBtn.onclick = async (e) => {
-      e.stopPropagation();
-      if (isNoteTrashed) {
-        await deleteForeverNote(note.id);
-      } else {
-        await trashNote(note.id);
-      }
-      closeSplitPane(note.id);
-    };
-    footer.appendChild(splitTrashBtn);
-    footer.appendChild(splitStorageBadge);
-
-    pane.appendChild(footer);
-    splitPanesContainer.appendChild(pane);
+    modal2List.appendChild(item);
   });
+}
+
+function loadSecondNote(noteId) {
+  const note = allNotes.find((n) => n.id === noteId);
+  if (!note || !modal2Editor || !modal2Picker) return;
+  modal2NoteId = note.id;
+  modal2Picker.style.display = "none";
+  modal2Editor.style.display = "flex";
+  if (modal2ChangeBtn) modal2ChangeBtn.style.display = "inline-block";
+
+  modal2TitleInput.value = note.title || "";
+  modal2RichEditor.innerHTML = note.content || "";
+  if (note.is_checklist && note.checklist && note.checklist.length > 0) {
+    modal2ChecklistItems = [...note.checklist];
+    modal2ChecklistContainer.style.display = "block";
+    modal2RichEditor.style.display = "none";
+    renderChecklistEditor(modal2ChecklistContainer, modal2ChecklistItems, (updated) => {
+      modal2ChecklistItems = updated;
+      debouncedSaveSecondNote();
+    });
+  } else {
+    modal2ChecklistContainer.style.display = "none";
+    modal2RichEditor.style.display = "block";
+    modal2ChecklistItems = [];
+  }
+  renderModalAttachments(note.attachments || [], modal2AttachmentsList);
+}
+
+function debouncedSaveSecondNote() {
+  clearTimeout(modal2SaveTimer);
+  modal2SaveTimer = setTimeout(() => saveSecondNote(), 450);
+}
+
+async function saveSecondNote() {
+  if (!modal2NoteId) return;
+  const note = allNotes.find((n) => n.id === modal2NoteId);
+  if (!note) return;
+
+  const title = modal2TitleInput ? modal2TitleInput.value.trim() : note.title;
+  const isChecklist = modal2ChecklistContainer && modal2ChecklistContainer.style.display !== "none";
+  const content = isChecklist ? "" : (modal2RichEditor ? modal2RichEditor.innerHTML.trim() : note.content);
+
+  const payload = {
+    title,
+    text: content,
+    content,
+    is_checklist: isChecklist,
+    checklist: isChecklist ? modal2ChecklistItems : [],
+  };
+
+  try {
+    await fetch(`/api/notes/${modal2NoteId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...vaultHeaders() },
+      body: JSON.stringify(payload),
+    });
+    // Update local memory
+    note.title = title;
+    note.content = content;
+    note.text = content;
+    note.is_checklist = isChecklist;
+    note.checklist = isChecklist ? modal2ChecklistItems : [];
+  } catch (err) {
+    console.error("Error saving side note:", err);
+  }
 }
 
 // ── Workspaces Management ──────────────────────────────────────────────────
@@ -2563,9 +2171,6 @@ async function toggleNoteVault(noteId) {
         modalVaultBtn.title = targetVaultState ? "Unlock from Vault" : "Lock in Vault (Protected)";
       }
       await loadNotes(false);
-      if (openPanes.includes(noteId)) {
-        renderSplitWorkspace();
-      }
     } else {
       showToast("Failed to update Vault status");
     }
@@ -2801,8 +2406,8 @@ function showQRCode(note) {
   qrModalUrlText.textContent = shareText.slice(0, 160) + (shareText.length > 160 ? "..." : "");
   qrCodeSvgContainer.innerHTML = createQRCodeSVG(shareText, 220);
 
-  qrCopyBtn.onclick = () => {
-    navigator.clipboard.writeText(shareText);
+  qrCopyBtn.onclick = async () => {
+    await copyToClipboard(shareText);
     showToast("Note content copied to clipboard");
   };
 
@@ -2880,6 +2485,11 @@ async function loadNotes(showLoading = true) {
       allNotes = (Array.isArray(raw) ? raw : []).map(normalizeNote);
       renderSidebarTags();
       renderNotesGrid();
+      // Keep local sync revision aligned with backend
+      fetch("/api/sync-token", { headers: vaultHeaders() })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d && typeof d.revision === "number") clientSyncRevision = d.revision; })
+        .catch(() => {});
     }
   } catch (err) {
     console.error("Failed to load notes:", err);
@@ -3184,23 +2794,43 @@ function renderStorageInspector(stats) {
 const fetchStats = updateStats;
 
 async function toggleNotePin(noteId, isPinned) {
-  await fetch(`/api/notes/${noteId}`, {
+  const note = allNotes.find((n) => n.id === noteId);
+  if (note) {
+    note.is_pinned = isPinned;
+    note.pinned = isPinned;
+  }
+  renderNotesGrid();
+  fetch(`/api/notes/${noteId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...vaultHeaders() },
     body: JSON.stringify({ pinned: isPinned, is_pinned: isPinned }),
-  });
-  await loadNotes(false);
-  await updateStats();
+  }).catch((err) => console.error("Pin save error:", err));
 }
 
 async function updateNoteColor(noteId, color) {
-  await fetch(`/api/notes/${noteId}`, {
+  const note = allNotes.find((n) => n.id === noteId);
+  if (note) note.color = color;
+
+  const card = document.querySelector(`.card[data-id="${noteId}"]`);
+  if (card) {
+    const pal = paletteFor(color);
+    card.className = card.className.replace(/\bnote-color-\S+/g, "").trim();
+    card.classList.add(`note-color-${pal.name}`);
+    card.style.backgroundColor = pal.bg;
+    card.style.borderColor = pal.border;
+    const fadeEl = card.querySelector(".card-content-fade");
+    if (fadeEl) {
+      fadeEl.style.background = `linear-gradient(to bottom, transparent, ${pal.bg})`;
+    }
+    const popover = card.querySelector(".color-popover");
+    if (popover) popover.classList.remove("show");
+  }
+
+  fetch(`/api/notes/${noteId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...vaultHeaders() },
     body: JSON.stringify({ color }),
-  });
-  await loadNotes(false);
-  await updateStats();
+  }).catch((err) => console.error("Color save error:", err));
 }
 
 async function togglePersistNote(noteId) {
@@ -3329,13 +2959,25 @@ async function emptyTrash() {
 }
 
 async function saveChecklistUpdate(noteId, checklist) {
-  await fetch(`/api/notes/${noteId}`, {
+  const note = allNotes.find((n) => n.id === noteId);
+  if (note) note.checklist = checklist;
+
+  const card = document.querySelector(`.card[data-id="${noteId}"]`);
+  if (card) {
+    const progress = calculateChecklistProgress(checklist);
+    if (progress) {
+      const fillEl = card.querySelector(".checklist-progress-fill");
+      const textEl = card.querySelector(".checklist-progress-text");
+      if (fillEl) fillEl.style.width = `${progress.percent}%`;
+      if (textEl) textEl.textContent = `${progress.checked}/${progress.total}`;
+    }
+  }
+
+  fetch(`/api/notes/${noteId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...vaultHeaders() },
     body: JSON.stringify({ checklist }),
-  });
-  await loadNotes(false);
-  await updateStats();
+  }).catch((err) => console.error("Checklist save error:", err));
 }
 
 async function uploadFilesToNote(noteId, files) {
@@ -3517,6 +3159,205 @@ function promptVaultPassword(isSetup = false, onSuccess = null) {
 
 // ── Event Listeners Setup ──────────────────────────────────────────────────
 function setupEventListeners() {
+  // ── Delegated Grid Card Event Handlers ───────────────────────────────────
+  notesGridRoot.addEventListener("click", async (e) => {
+    const card = e.target.closest(".card");
+    if (!card) return;
+    const noteId = card.dataset.id;
+    const note = allNotes.find((n) => n.id === noteId);
+    if (!note) return;
+
+    const actionEl = e.target.closest("[data-action]");
+    if (actionEl) {
+      e.stopPropagation();
+      const action = actionEl.dataset.action;
+      switch (action) {
+        case "select":
+          toggleCardSelection(noteId, e.shiftKey);
+          return;
+        case "copy": {
+          const textToCopy = `${note.title ? note.title + "\n\n" : ""}${note.content || ""}`.trim();
+          if (textToCopy) {
+            copyToClipboard(textToCopy);
+            showToast("Note copied to clipboard");
+          }
+          return;
+        }
+        case "pin":
+          toggleNotePin(noteId, !note.is_pinned);
+          return;
+        case "expand": {
+          const clampedWrapper = card.querySelector(".card-content-clamped");
+          if (clampedWrapper) {
+            const isExp = clampedWrapper.classList.toggle("expanded");
+            actionEl.textContent = isExp ? "Show less" : "Show more";
+          }
+          return;
+        }
+        case "open-all-tabs": {
+          if (note.content) {
+            const matches = note.content.match(/https?:\/\/[^\s<>"'()]+/g);
+            if (matches) {
+              matches.forEach((u) => window.open(u, "_blank"));
+            }
+          }
+          return;
+        }
+        case "uncheck-all": {
+          if (note.checklist) {
+            const updated = uncheckAllItems(note.checklist);
+            saveChecklistUpdate(noteId, updated);
+            card.querySelectorAll(".checklist-item").forEach((it) => it.classList.remove("checked"));
+            card.querySelectorAll(".checklist-checkbox").forEach((cb) => (cb.checked = false));
+          }
+          return;
+        }
+        case "delete-checked": {
+          if (note.checklist) {
+            const updated = deleteCheckedItems(note.checklist);
+            saveChecklistUpdate(noteId, updated);
+            card.querySelectorAll(".checklist-item.checked").forEach((it) => it.remove());
+          }
+          return;
+        }
+        case "peek-zip": {
+          const attId = actionEl.dataset.attId;
+          const attName = actionEl.dataset.attName;
+          if (attId) openArchivePeek(attId, attName);
+          return;
+        }
+        case "rename-att": {
+          const attId = actionEl.dataset.attId;
+          const attName = actionEl.dataset.attName;
+          if (attId) {
+            const newName = prompt("Rename attachment:", attName);
+            if (newName && newName.trim() && newName !== attName) {
+              await renameAttachment(noteId, attId, newName.trim());
+            }
+          }
+          return;
+        }
+        case "filter-tag": {
+          const tag = actionEl.dataset.tag;
+          if (tag) toggleSearchFlair(tag);
+          return;
+        }
+        case "color-popover": {
+          const popover = card.querySelector(".color-popover");
+          if (popover) {
+            document.querySelectorAll(".card-more-popover.show, .card-ws-popover").forEach((p) => p.classList.remove("show"));
+            popover.classList.toggle("show");
+          }
+          return;
+        }
+        case "restore":
+          restoreNote(noteId);
+          return;
+        case "delete-forever":
+          deleteForeverNote(noteId);
+          return;
+        case "archive":
+          toggleNoteArchive(noteId, !note.is_archived);
+          return;
+        case "split":
+          openInSplitWorkspace(noteId);
+          return;
+        case "trash":
+          trashNote(noteId);
+          return;
+        case "more-popover": {
+          const popover = card.querySelector(".card-more-popover");
+          if (popover) {
+            document.querySelectorAll(".color-popover.show, .card-more-popover.show, .card-ws-popover").forEach((p) => {
+              if (p !== popover) p.classList.remove("show");
+            });
+            popover.classList.toggle("show");
+          }
+          return;
+        }
+        case "move-ws": {
+          const popover = card.querySelector(".card-more-popover");
+          if (popover) popover.classList.remove("show");
+          const moreBtn = card.querySelector('[data-action="more-popover"]');
+          showMoveWorkspacePopover(noteId, moreBtn || card);
+          return;
+        }
+        case "labels": {
+          const popover = card.querySelector(".card-more-popover");
+          if (popover) popover.classList.remove("show");
+          openTagPromptModal(async (tag) => {
+            if (!tag) return;
+            const curTags = new Set(note.tags || []);
+            curTags.add(tag);
+            await addTagToNote(noteId, Array.from(curTags));
+          });
+          return;
+        }
+        case "persist": {
+          const popover = card.querySelector(".card-more-popover");
+          if (popover) popover.classList.remove("show");
+          togglePersistNote(noteId);
+          return;
+        }
+        case "vault": {
+          const popover = card.querySelector(".card-more-popover");
+          if (popover) popover.classList.remove("show");
+          toggleNoteVault(noteId);
+          return;
+        }
+        case "duplicate": {
+          const popover = card.querySelector(".card-more-popover");
+          if (popover) popover.classList.remove("show");
+          duplicateNote(noteId);
+          return;
+        }
+        case "export-md": {
+          const popover = card.querySelector(".card-more-popover");
+          if (popover) popover.classList.remove("show");
+          exportNoteMarkdown(note);
+          return;
+        }
+      }
+    }
+
+    if (e.target.closest("button, a, input, .color-popover, .card-more-popover, .workspace-popover")) {
+      return;
+    }
+
+    if (note.is_trash) {
+      showToast("Note is in Trash. Restore it to view or edit.", async () => {
+        await restoreNote(note.id);
+      });
+      return;
+    }
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault();
+      openInSplitWorkspace(note.id);
+      return;
+    }
+    openEditModal(note.id);
+  });
+
+  // Delegated change listener for checklist checkboxes
+  notesGridRoot.addEventListener("change", (e) => {
+    if (e.target.matches("input.checklist-checkbox")) {
+      e.stopPropagation();
+      const card = e.target.closest(".card");
+      if (!card) return;
+      const noteId = card.dataset.id;
+      const note = allNotes.find((n) => n.id === noteId);
+      if (!note || !note.checklist) return;
+
+      const idx = parseInt(e.target.dataset.index, 10);
+      if (!isNaN(idx) && note.checklist[idx]) {
+        note.checklist[idx].checked = e.target.checked;
+        const itemEl = e.target.closest(".checklist-item");
+        if (itemEl) itemEl.classList.toggle("checked", e.target.checked);
+        saveChecklistUpdate(noteId, note.checklist);
+      }
+    }
+  });
+
   // Navigation
   [navNotes, navArchive, navTrash, navVault].forEach((btn) => {
     if (!btn) return;
@@ -3820,57 +3661,24 @@ function setupEventListeners() {
     composerIsChecklist = !composerIsChecklist;
     composerChecklistToggleBtn.classList.toggle("active", composerIsChecklist);
     if (composerIsChecklist) {
+      const text = composerRichEditor.innerText || composerRichEditor.textContent || "";
+      composerChecklistItems = convertTextToChecklist(text);
       if (composerChecklistItems.length === 0) {
         composerChecklistItems.push({ text: "", checked: false, indent: 0 });
       }
+      composerRichEditor.style.display = "none";
+      composerRawTextarea.style.display = "none";
       composerChecklistContainer.style.display = "block";
       renderChecklistEditor(composerChecklistContainer, composerChecklistItems, (updated) => {
         composerChecklistItems = updated;
       });
     } else {
+      const text = convertChecklistToText(composerChecklistItems);
+      composerRichEditor.innerHTML = text;
       composerChecklistContainer.style.display = "none";
+      composerRichEditor.style.display = "block";
+      composerChecklistItems = [];
     }
-  };
-
-  // Voice Memo Recorder in Composer
-  composerVoiceBtn.onclick = async () => {
-    if (activeVoiceRecorder) return;
-    try {
-      activeVoiceRecorder = new VoiceMemoRecorder();
-      await activeVoiceRecorder.start((seconds) => {
-        const mins = Math.floor(seconds / 60);
-        const secs = String(seconds % 60).padStart(2, "0");
-        composerVoiceTimer.textContent = `${mins}:${secs}`;
-      });
-      composerVoiceBar.style.display = "flex";
-      composerVoiceBtn.classList.add("active");
-    } catch (err) {
-      showToast("Microphone permission required for voice memo");
-      activeVoiceRecorder = null;
-    }
-  };
-
-  composerVoiceStopBtn.onclick = async () => {
-    if (!activeVoiceRecorder) return;
-    const blob = await activeVoiceRecorder.stop();
-    composerVoiceBar.style.display = "none";
-    composerVoiceBtn.classList.remove("active");
-    activeVoiceRecorder = null;
-    if (blob) {
-      const stamp = formatDateTimeStamp();
-      const file = new File([blob], `voice-memo-${stamp}.webm`, { type: "audio/webm" });
-      composerPendingFiles.push(file);
-      renderComposerPendingFiles();
-      showToast("Voice memo recorded");
-    }
-  };
-
-  composerVoiceCancelBtn.onclick = () => {
-    if (!activeVoiceRecorder) return;
-    activeVoiceRecorder.cancel();
-    composerVoiceBar.style.display = "none";
-    composerVoiceBtn.classList.remove("active");
-    activeVoiceRecorder = null;
   };
 
   // File Attachments in Composer
@@ -3927,41 +3735,6 @@ function setupEventListeners() {
     }
   };
 
-  // Modal Voice Memo Recorder
-  let modalVoiceRecorder = null;
-  modalVoiceBtn.onclick = async () => {
-    if (modalVoiceRecorder && modalVoiceRecorder.isRecording) {
-      modalVoiceRecorder.stop();
-      return;
-    }
-    modalVoiceBar.style.display = "flex";
-    modalVoiceRecorder = new VoiceMemoRecorder({
-      timerEl: modalVoiceTimer,
-      showToast,
-      onAudioReady: async (audioFile) => {
-        if (currentEditingNoteId && audioFile) {
-          await uploadFilesToNote(currentEditingNoteId, [audioFile]);
-          const updated = allNotes.find((n) => n.id === currentEditingNoteId);
-          if (updated) renderModalAttachments(updated.attachments || []);
-        }
-        modalVoiceBar.style.display = "none";
-      },
-    });
-    const started = await modalVoiceRecorder.start();
-    if (!started) {
-      modalVoiceBar.style.display = "none";
-    }
-  };
-
-  modalVoiceCancelBtn.onclick = () => {
-    if (modalVoiceRecorder) modalVoiceRecorder.cancel();
-    modalVoiceBar.style.display = "none";
-  };
-
-  modalVoiceDoneBtn.onclick = () => {
-    if (modalVoiceRecorder) modalVoiceRecorder.stop();
-    modalVoiceBar.style.display = "none";
-  };
 
   // Modal Shield Toggle
   modalShieldBtn.onclick = async () => {
@@ -4037,11 +3810,57 @@ function setupEventListeners() {
     };
   }
 
-  if (modalSplitBtn) {
-    modalSplitBtn.onclick = () => {
-      if (currentEditingNoteId) toggleSplitPane(currentEditingNoteId);
+  if (modalBesideBtn) {
+    modalBesideBtn.onclick = () => {
+      if (editModalCard.classList.contains("side-by-side")) {
+        closeSideBySideMode();
+      } else {
+        openSideBySideMode();
+      }
     };
   }
+
+  if (modalSplitBtn) {
+    modalSplitBtn.onclick = () => {
+      if (editModalCard.classList.contains("side-by-side")) {
+        closeSideBySideMode();
+      } else {
+        openSideBySideMode();
+      }
+    };
+  }
+
+  if (modalHeaderCloseBtn) {
+    modalHeaderCloseBtn.onclick = () => closeEditModal();
+  }
+
+  if (modal2CloseBtn) {
+    modal2CloseBtn.onclick = () => closeSideBySideMode();
+  }
+
+  if (modal2ChangeBtn) {
+    modal2ChangeBtn.onclick = () => showSecondNotePicker();
+  }
+
+  if (modal2Search) {
+    modal2Search.oninput = () => renderSecondNotePickerList(modal2Search.value.trim());
+  }
+
+  if (modal2TitleInput) {
+    modal2TitleInput.oninput = debouncedSaveSecondNote;
+  }
+
+  if (modal2RichEditor) {
+    setupCleanPaste(modal2RichEditor);
+    setupInlineMath(modal2RichEditor);
+    modal2RichEditor.oninput = debouncedSaveSecondNote;
+  }
+
+  editModalBackdrop.addEventListener("click", (e) => {
+    if (e.target === editModalBackdrop) {
+      closeEditModal();
+    }
+  });
 
   if (modalVaultBtn) {
     modalVaultBtn.onclick = () => {
@@ -4102,17 +3921,17 @@ function setupEventListeners() {
   cliCloseBtn.onclick = () => (cliModalBackdrop.style.display = "none");
   cliDoneBtn.onclick = () => (cliModalBackdrop.style.display = "none");
   cliCopy1.onclick = () => {
-    navigator.clipboard.writeText(cliSnippet1.textContent);
+    copyToClipboard(cliSnippet1.textContent);
     cliCopy1.textContent = "Copied!";
     setTimeout(() => (cliCopy1.textContent = "Copy"), 2000);
   };
   cliCopy2.onclick = () => {
-    navigator.clipboard.writeText(cliSnippet2.textContent);
+    copyToClipboard(cliSnippet2.textContent);
     cliCopy2.textContent = "Copied!";
     setTimeout(() => (cliCopy2.textContent = "Copy"), 2000);
   };
   cliCopy3.onclick = () => {
-    navigator.clipboard.writeText(cliSnippet3.textContent);
+    copyToClipboard(cliSnippet3.textContent);
     cliCopy3.textContent = "Copied!";
     setTimeout(() => (cliCopy3.textContent = "Copy"), 2000);
   };
@@ -4370,6 +4189,90 @@ function setupEventListeners() {
   });
 }
 
+// ── Canvas Rubber-Band Lasso Selection ─────────────────────────────────────
+function setupRubberbandSelection() {
+  let isDragging = false;
+  let didDrag = false;
+  let startX = 0, startY = 0;
+  let lassoEl = null;
+
+  document.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    // Don't trigger if clicking inside card, modal, header, sidebar, capture box, or interactive controls
+    if (e.target.closest(".card, .modal-backdrop, .app-header, .sidebar, .capture-box, .btn-icon, button, input, textarea, a, select, .workspace-popover, .card-more-popover, .color-popover, .toast, .trash-banner")) {
+      return;
+    }
+    const mainContent = document.getElementById("main-content");
+    if (!mainContent || (!mainContent.contains(e.target) && e.target !== document.body && e.target !== document.documentElement)) {
+      return;
+    }
+
+    startX = e.clientX;
+    startY = e.clientY;
+    isDragging = true;
+    didDrag = false;
+
+    function onMouseMove(moveEvent) {
+      if (!isDragging) return;
+      const curX = moveEvent.clientX;
+      const curY = moveEvent.clientY;
+      const x = Math.min(startX, curX);
+      const y = Math.min(startY, curY);
+      const w = Math.abs(curX - startX);
+      const h = Math.abs(curY - startY);
+
+      if (!didDrag && (w > 6 || h > 6)) {
+        didDrag = true;
+        lassoEl = document.createElement("div");
+        lassoEl.className = "rubberband-selection";
+        document.body.appendChild(lassoEl);
+      }
+
+      if (didDrag && lassoEl) {
+        lassoEl.style.left = `${x}px`;
+        lassoEl.style.top = `${y}px`;
+        lassoEl.style.width = `${w}px`;
+        lassoEl.style.height = `${h}px`;
+
+        if (!moveEvent.shiftKey && !moveEvent.metaKey && !moveEvent.ctrlKey) {
+          selectedNoteIds.clear();
+        }
+        const cards = document.querySelectorAll("#notes-grid-root .card");
+        cards.forEach((c) => {
+          const r = c.getBoundingClientRect();
+          const intersects = !(r.right < x || r.left > x + w || r.bottom < y || r.top > y + h);
+          const id = c.dataset.id;
+          if (intersects && id) {
+            selectedNoteIds.add(id);
+            c.classList.add("selected");
+          } else if (!moveEvent.shiftKey && !moveEvent.metaKey && !moveEvent.ctrlKey) {
+            c.classList.remove("selected");
+          }
+        });
+        updateSelectionBar();
+      }
+    }
+
+    function onMouseUp(upEvent) {
+      isDragging = false;
+      if (lassoEl) {
+        lassoEl.remove();
+        lassoEl = null;
+      }
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+
+      // If clicked without dragging on empty canvas, clear active selection
+      if (!didDrag && selectedNoteIds.size > 0 && !upEvent.shiftKey && !upEvent.metaKey && !upEvent.ctrlKey) {
+        clearSelection();
+      }
+    }
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  });
+}
+
 function openTagPromptModal(cb) {
   currentTagCallback = cb;
   tagPromptInput.value = "";
@@ -4382,6 +4285,7 @@ async function initApp() {
   try { applyGridDensity(gridDensity); } catch (e) { console.error("Density err:", e); }
   try { setupEventListeners(); } catch (e) { console.error("Listeners err:", e); }
   try { initLiveSync(); } catch (e) { console.error("Sync err:", e); }
+  try { setupRubberbandSelection(); } catch (e) { console.error("Lasso err:", e); }
   try { await loadWorkspaces(); } catch (e) { console.error("Workspaces err:", e); }
   try { await checkVaultStatus(); } catch (e) { console.error("Vault err:", e); }
   try { await loadNotes(); } catch (e) { console.error("Notes err:", e); }

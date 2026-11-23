@@ -171,15 +171,20 @@ export function setupSmartTyping(editorEl, onChecklistTrigger) {
 }
 
 // Document Outline Extractor: extracts H1, H2, H3 with smooth scroll
-export function extractDocumentOutline(editorEl, outlineContainer) {
+// Automatically collapses outline rail when 0 headings exist, expanding when present
+export function extractDocumentOutline(editorEl, outlineContainer, railEl = null) {
   if (!editorEl || !outlineContainer) return;
+  const rail = railEl || outlineContainer.closest(".outline-rail") || document.getElementById("modal-outline-rail");
   outlineContainer.innerHTML = "";
   const headings = editorEl.querySelectorAll("h1, h2, h3");
 
   if (headings.length === 0) {
+    if (rail) rail.classList.add("collapsed");
     outlineContainer.innerHTML = `<div style="font-size:11.5px; color:var(--text-muted); font-style:italic; padding:4px;">No headings (use H1–H3)</div>`;
     return;
   }
+
+  if (rail) rail.classList.remove("collapsed");
 
   headings.forEach((h, index) => {
     const text = h.textContent.trim() || `Heading ${index + 1}`;
@@ -200,8 +205,8 @@ export function calculateChecklistProgress(items) {
   if (!items || items.length === 0) return null;
   const total = items.length;
   const checked = items.filter(it => it.checked).length;
-  const pct = Math.round((checked / total) * 100);
-  return { total, checked, pct };
+  const percent = total > 0 ? Math.round((checked / total) * 100) : 0;
+  return { total, checked, percent, pct: percent };
 }
 
 export function uncheckAllItems(items) {
@@ -214,36 +219,68 @@ export function deleteCheckedItems(items) {
 
 export function convertTextToChecklist(text) {
   if (!text) return [];
-  // Strip simple HTML tags if present
-  const clean = text.replace(/<br\s*[\/]?>/gi, "\n").replace(/<[^>]+>/g, "");
+  // Strip simple HTML tags and break lines
+  const clean = text.replace(/<br\s*[\/]?>/gi, "\n").replace(/<\/div>/gi, "\n").replace(/<[^>]+>/g, "");
   const lines = clean.split("\n").map(l => l.trim()).filter(Boolean);
-  return lines.map(line => ({
-    text: line.replace(/^[-*•\d\.\s\[\]x]+/, "").trim() || line,
-    checked: false,
-    indent: 0,
-  }));
+  return lines.map(line => {
+    const isChecked = /^[☑✓✔]|^\s*[-*•]?\s*\[[xX]\]/.test(line);
+    const cleanedText = line.replace(/^([☐☑✓✔✗✘\-\*\•\d\.]+|\[[ xX]?\])\s*/, "").trim();
+    return {
+      text: cleanedText || line,
+      checked: isChecked,
+      indent: 0,
+    };
+  });
 }
 
 export function convertChecklistToText(items) {
   if (!items || items.length === 0) return "";
-  return items.map(it => `<div>${it.checked ? "☑ " : "☐ "}${it.text || ""}</div>`).join("");
+  return items
+    .map(it => {
+      let t = (it.text || "").trim();
+      // Cleanly strip any lingering checklist bullet markers
+      t = t.replace(/^([☐☑✓✔✗✘\-\*\•\d\.]+|\[[ xX]?\])\s*/, "").trim();
+      return `<div>${t || "&nbsp;"}</div>`;
+    })
+    .join("");
+}
+
+let checklistDebounceTimer = null;
+function debouncedChecklistChange(items, onChange, ms = 450) {
+  clearTimeout(checklistDebounceTimer);
+  checklistDebounceTimer = setTimeout(() => onChange(items), ms);
 }
 
 export function renderChecklistEditor(container, items, onChange) {
   if (!container) return;
   container.innerHTML = "";
+
+  if (container._completedExpanded === undefined) {
+    container._completedExpanded = false;
+  }
+
   const wrapper = document.createElement("div");
+  wrapper.className = "checklist-editor-wrapper";
   wrapper.style.display = "flex";
   wrapper.style.flexDirection = "column";
-  wrapper.style.gap = "6px";
-  wrapper.style.marginTop = "6px";
+  wrapper.style.gap = "4px";
+  wrapper.style.marginTop = "4px";
 
-  items.forEach((item, index) => {
+  // Active items list
+  const activeList = document.createElement("div");
+  activeList.className = "checklist-active-list";
+  activeList.style.display = "flex";
+  activeList.style.flexDirection = "column";
+  activeList.style.gap = "4px";
+
+  // Build row element
+  function createRow(item, index) {
     const row = document.createElement("div");
+    row.className = `checklist-row ${item.checked ? "checked" : ""} ${item.indent ? "indented" : ""}`;
     row.style.display = "flex";
     row.style.alignItems = "center";
     row.style.gap = "8px";
-    row.style.paddingLeft = `${(item.indent || 0) * 18}px`;
+    row.style.paddingLeft = item.indent ? "24px" : "0px";
 
     const cb = document.createElement("input");
     cb.type = "checkbox";
@@ -251,53 +288,110 @@ export function renderChecklistEditor(container, items, onChange) {
     cb.checked = !!item.checked;
     cb.onchange = () => {
       item.checked = cb.checked;
+      // If checking a parent (indent 0), cascade check to immediate indented children (indent 1)
+      if (item.checked && !item.indent) {
+        let nextIdx = index + 1;
+        while (nextIdx < items.length && items[nextIdx].indent === 1) {
+          items[nextIdx].checked = true;
+          nextIdx++;
+        }
+      }
+      // Re-group: unchecked items first, checked items at bottom
+      const active = items.filter(it => !it.checked);
+      const done = items.filter(it => it.checked);
+      items.length = 0;
+      items.push(...active, ...done);
       onChange(items);
+      renderChecklistEditor(container, items, onChange);
     };
 
     const input = document.createElement("input");
     input.type = "text";
-    input.className = "search-bar";
+    input.className = "search-bar checklist-input";
     input.style.height = "32px";
     input.style.borderRadius = "6px";
     input.style.padding = "0 10px";
     input.style.flex = "1";
     input.value = item.text || "";
     input.placeholder = "List item...";
+    if (item.checked) {
+      input.style.textDecoration = "line-through";
+      input.style.opacity = "0.7";
+    }
 
     input.oninput = () => {
       item.text = input.value;
-      onChange(items);
+      debouncedChecklistChange(items, onChange, 450);
     };
 
     input.onkeydown = (e) => {
       if (e.key === "Tab") {
         e.preventDefault();
-        if (e.shiftKey) {
-          item.indent = Math.max(0, (item.indent || 0) - 1);
-        } else {
-          item.indent = Math.min(3, (item.indent || 0) + 1);
-        }
+        item.indent = e.shiftKey ? 0 : 1;
+        onChange(items);
         renderChecklistEditor(container, items, onChange);
       } else if (e.key === "Enter") {
         e.preventDefault();
         items.splice(index + 1, 0, { text: "", checked: false, indent: item.indent || 0 });
+        onChange(items);
         renderChecklistEditor(container, items, onChange);
         setTimeout(() => {
-          const allInputs = container.querySelectorAll("input[type=text]");
+          const allInputs = container.querySelectorAll("input.checklist-input");
           if (allInputs[index + 1]) allInputs[index + 1].focus();
         }, 50);
       } else if (e.key === "Backspace" && input.value === "" && items.length > 1) {
         e.preventDefault();
         items.splice(index, 1);
+        onChange(items);
         renderChecklistEditor(container, items, onChange);
         setTimeout(() => {
-          const allInputs = container.querySelectorAll("input[type=text]");
+          const allInputs = container.querySelectorAll("input.checklist-input");
           if (allInputs[Math.max(0, index - 1)]) allInputs[Math.max(0, index - 1)].focus();
         }, 50);
       }
     };
 
+    const actions = document.createElement("div");
+    actions.className = "checklist-item-actions";
+    actions.style.display = "flex";
+    actions.style.alignItems = "center";
+    actions.style.gap = "2px";
+
+    // Indent / outdent toggle buttons
+    if (!item.indent) {
+      const indentBtn = document.createElement("button");
+      indentBtn.type = "button";
+      indentBtn.className = "btn-icon checklist-indent-btn";
+      indentBtn.style.width = "24px";
+      indentBtn.style.height = "24px";
+      indentBtn.style.fontSize = "12px";
+      indentBtn.title = "Indent (Tab)";
+      indentBtn.innerHTML = "⇥";
+      indentBtn.onclick = () => {
+        item.indent = 1;
+        onChange(items);
+        renderChecklistEditor(container, items, onChange);
+      };
+      actions.appendChild(indentBtn);
+    } else {
+      const outdentBtn = document.createElement("button");
+      outdentBtn.type = "button";
+      outdentBtn.className = "btn-icon checklist-outdent-btn";
+      outdentBtn.style.width = "24px";
+      outdentBtn.style.height = "24px";
+      outdentBtn.style.fontSize = "12px";
+      outdentBtn.title = "Outdent (Shift+Tab)";
+      outdentBtn.innerHTML = "⇤";
+      outdentBtn.onclick = () => {
+        item.indent = 0;
+        onChange(items);
+        renderChecklistEditor(container, items, onChange);
+      };
+      actions.appendChild(outdentBtn);
+    }
+
     const delBtn = document.createElement("button");
+    delBtn.type = "button";
     delBtn.className = "btn-icon";
     delBtn.style.width = "24px";
     delBtn.style.height = "24px";
@@ -305,38 +399,111 @@ export function renderChecklistEditor(container, items, onChange) {
     delBtn.title = "Delete item";
     delBtn.onclick = () => {
       items.splice(index, 1);
+      onChange(items);
       renderChecklistEditor(container, items, onChange);
     };
+    actions.appendChild(delBtn);
 
     row.appendChild(cb);
     row.appendChild(input);
-    row.appendChild(delBtn);
-    wrapper.appendChild(row);
-  });
+    row.appendChild(actions);
+    return row;
+  }
 
-  const footerTools = document.createElement("div");
-  footerTools.style.display = "flex";
-  footerTools.style.alignItems = "center";
-  footerTools.style.gap = "8px";
-  footerTools.style.marginTop = "4px";
+  // Render unchecked (active) items
+  items.forEach((item, index) => {
+    if (!item.checked) {
+      activeList.appendChild(createRow(item, index));
+    }
+  });
+  wrapper.appendChild(activeList);
+
+  // Add Item button below active list
+  const activeTools = document.createElement("div");
+  activeTools.style.display = "flex";
+  activeTools.style.alignItems = "center";
+  activeTools.style.gap = "8px";
+  activeTools.style.marginTop = "4px";
 
   const addBtn = document.createElement("button");
+  addBtn.type = "button";
   addBtn.className = "btn-secondary";
   addBtn.style.padding = "4px 10px";
   addBtn.style.fontSize = "12px";
   addBtn.textContent = "+ List item";
   addBtn.onclick = () => {
-    items.push({ text: "", checked: false, indent: 0 });
+    const firstDoneIdx = items.findIndex(it => it.checked);
+    const insertIdx = firstDoneIdx >= 0 ? firstDoneIdx : items.length;
+    items.splice(insertIdx, 0, { text: "", checked: false, indent: 0 });
+    onChange(items);
     renderChecklistEditor(container, items, onChange);
     setTimeout(() => {
-      const allInputs = container.querySelectorAll("input[type=text]");
+      const allInputs = activeList.querySelectorAll("input.checklist-input");
       if (allInputs[allInputs.length - 1]) allInputs[allInputs.length - 1].focus();
     }, 50);
   };
-  footerTools.appendChild(addBtn);
+  activeTools.appendChild(addBtn);
+  wrapper.appendChild(activeTools);
 
-  if (items.some(it => it.checked)) {
+  // Collapsible "Completed items" section
+  const completedItems = items.filter(it => it.checked);
+  if (completedItems.length > 0) {
+    const compSection = document.createElement("div");
+    compSection.className = "checklist-completed-section";
+    compSection.style.marginTop = "12px";
+    compSection.style.borderTop = "1px solid var(--border)";
+    compSection.style.paddingTop = "8px";
+
+    const compHeader = document.createElement("button");
+    compHeader.type = "button";
+    compHeader.className = "checklist-completed-toggle";
+    compHeader.style.display = "flex";
+    compHeader.style.alignItems = "center";
+    compHeader.style.gap = "6px";
+    compHeader.style.background = "transparent";
+    compHeader.style.border = "none";
+    compHeader.style.color = "var(--text-muted)";
+    compHeader.style.fontSize = "12.5px";
+    compHeader.style.fontWeight = "600";
+    compHeader.style.cursor = "pointer";
+    compHeader.style.padding = "4px 0";
+    compHeader.innerHTML = `
+      <span class="checklist-arrow">${container._completedExpanded ? "▾" : "▸"}</span>
+      <span>${completedItems.length} completed ${completedItems.length === 1 ? "item" : "items"}</span>
+    `;
+
+    const compList = document.createElement("div");
+    compList.className = "checklist-completed-list";
+    compList.style.display = container._completedExpanded ? "flex" : "none";
+    compList.style.flexDirection = "column";
+    compList.style.gap = "4px";
+    compList.style.marginTop = "6px";
+
+    items.forEach((item, index) => {
+      if (item.checked) {
+        compList.appendChild(createRow(item, index));
+      }
+    });
+
+    compHeader.onclick = () => {
+      container._completedExpanded = !container._completedExpanded;
+      compList.style.display = container._completedExpanded ? "flex" : "none";
+      const arrow = compHeader.querySelector(".checklist-arrow");
+      if (arrow) arrow.textContent = container._completedExpanded ? "▾" : "▸";
+    };
+
+    compSection.appendChild(compHeader);
+    compSection.appendChild(compList);
+
+    // Global tools (Uncheck all / Delete checked)
+    const compTools = document.createElement("div");
+    compTools.style.display = "flex";
+    compTools.style.alignItems = "center";
+    compTools.style.gap = "8px";
+    compTools.style.marginTop = "8px";
+
     const uncheckBtn = document.createElement("button");
+    uncheckBtn.type = "button";
     uncheckBtn.className = "checklist-tool-btn";
     uncheckBtn.textContent = "Uncheck all";
     uncheckBtn.onclick = () => {
@@ -344,9 +511,10 @@ export function renderChecklistEditor(container, items, onChange) {
       onChange(updated);
       renderChecklistEditor(container, updated, onChange);
     };
-    footerTools.appendChild(uncheckBtn);
+    compTools.appendChild(uncheckBtn);
 
     const deleteCheckedBtn = document.createElement("button");
+    deleteCheckedBtn.type = "button";
     deleteCheckedBtn.className = "checklist-tool-btn";
     deleteCheckedBtn.textContent = "Delete checked";
     deleteCheckedBtn.onclick = () => {
@@ -354,9 +522,11 @@ export function renderChecklistEditor(container, items, onChange) {
       onChange(updated);
       renderChecklistEditor(container, updated, onChange);
     };
-    footerTools.appendChild(deleteCheckedBtn);
+    compTools.appendChild(deleteCheckedBtn);
+
+    compSection.appendChild(compTools);
+    wrapper.appendChild(compSection);
   }
 
-  wrapper.appendChild(footerTools);
   container.appendChild(wrapper);
 }

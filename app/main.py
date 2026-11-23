@@ -22,6 +22,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Query, Request, status
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
+from starlette.responses import Response
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -60,6 +62,28 @@ sse_subscribers: set[asyncio.Queue] = set()
 link_preview_cache: dict[str, dict] = {}
 MAX_LINK_CACHE = 500
 
+# ---------------------------------------------------------------------------
+# In-Memory Cache & Storage Metadata Index
+# ---------------------------------------------------------------------------
+notes_cache: list[dict] = []
+notes_index: dict[str, dict] = {}
+notes_cache_loaded: bool = False
+
+workspaces_cache: list[dict] = []
+workspaces_cache_loaded: bool = False
+
+cached_stats_data: dict[bool, dict] = {}
+stats_cache_dirty: bool = True
+server_sync_revision: int = 1
+
+
+def invalidate_stats_cache():
+    """Mark storage metrics dirty, clear cached responses, and increment sync revision."""
+    global stats_cache_dirty, cached_stats_data, server_sync_revision
+    stats_cache_dirty = True
+    cached_stats_data.clear()
+    server_sync_revision += 1
+
 
 # ---------------------------------------------------------------------------
 # Storage & Persistence Helpers
@@ -80,7 +104,8 @@ def is_persist_available() -> bool:
 
 
 def _atomic_write(path: str, obj: Any):
-    """Atomically write JSON to disk using a unique temporary file and fsync, ensuring 1000:1000 ownership."""
+    """Atomically write JSON to disk using a unique temporary file and fsync, updating in-memory cache."""
+    global notes_cache, notes_index, notes_cache_loaded, workspaces_cache, workspaces_cache_loaded, stats_cache_dirty
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -102,6 +127,19 @@ def _atomic_write(path: str, obj: Any):
         os.chown(path, 1000, 1000)
     except Exception:
         pass
+
+    # Synchronize in-memory cache directly on disk writes
+    if path == NOTES_FILE and isinstance(obj, list):
+        notes_cache = list(obj)
+        notes_index = {n["id"]: n for n in notes_cache if isinstance(n, dict) and "id" in n}
+        notes_cache_loaded = True
+        invalidate_stats_cache()
+    elif path == WORKSPACES_FILE and isinstance(obj, list):
+        workspaces_cache = list(obj)
+        workspaces_cache_loaded = True
+        invalidate_stats_cache()
+    elif path in (PERSIST_NOTES_FILE, PERSIST_WORKSPACES_FILE):
+        invalidate_stats_cache()
 
 
 def init_storage():
@@ -129,31 +167,57 @@ def init_storage():
             _atomic_write(PERSIST_WORKSPACES_FILE, DEFAULT_WORKSPACES)
 
 
-def read_workspaces_sync() -> list:
-    """Read workspaces list from disk synchronously, falling back to default/persist."""
+def load_workspaces_into_memory() -> list:
+    """Load workspaces list from disk into in-memory cache."""
+    global workspaces_cache, workspaces_cache_loaded
     if not os.path.exists(WORKSPACES_FILE):
         if is_persist_available() and os.path.exists(PERSIST_WORKSPACES_FILE):
             try:
                 with open(PERSIST_WORKSPACES_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if isinstance(data, list) and len(data) > 0:
+                        workspaces_cache = data
+                        workspaces_cache_loaded = True
+                        invalidate_stats_cache()
                         _atomic_write(WORKSPACES_FILE, data)
                         return data
             except Exception:
                 pass
-        return list(DEFAULT_WORKSPACES)
+        workspaces_cache = list(DEFAULT_WORKSPACES)
+        workspaces_cache_loaded = True
+        invalidate_stats_cache()
+        return workspaces_cache
     try:
         with open(WORKSPACES_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, list) and len(data) > 0:
-                return data
-            return list(DEFAULT_WORKSPACES)
+                workspaces_cache = data
+            else:
+                workspaces_cache = list(DEFAULT_WORKSPACES)
+            workspaces_cache_loaded = True
+            invalidate_stats_cache()
+            return workspaces_cache
     except Exception:
-        return list(DEFAULT_WORKSPACES)
+        workspaces_cache = list(DEFAULT_WORKSPACES)
+        workspaces_cache_loaded = True
+        invalidate_stats_cache()
+        return workspaces_cache
+
+
+def read_workspaces_sync() -> list:
+    """Read workspaces list from in-memory cache, loading from disk on first call."""
+    global workspaces_cache, workspaces_cache_loaded
+    if not workspaces_cache_loaded:
+        return load_workspaces_into_memory()
+    return workspaces_cache
 
 
 def write_workspaces_sync(workspaces: list):
-    """Write workspaces list to disk and mirror to /persist if available."""
+    """Write workspaces list to in-memory cache and disk, mirroring to /persist if available."""
+    global workspaces_cache, workspaces_cache_loaded
+    workspaces_cache = list(workspaces)
+    workspaces_cache_loaded = True
+    invalidate_stats_cache()
     _atomic_write(WORKSPACES_FILE, workspaces)
     if is_persist_available():
         try:
@@ -272,10 +336,15 @@ def mirror_note_to_persist(note: dict, remove: bool = False):
         print(f"Error mirroring to persist: {e}")
 
 
-def read_notes_sync() -> list:
-    """Read all notes synchronously from disk, ensuring each has a workspace field."""
+def load_notes_into_memory() -> list:
+    """Load notes from disk into in-memory cache and index."""
+    global notes_cache, notes_index, notes_cache_loaded
     if not os.path.exists(NOTES_FILE):
-        return []
+        notes_cache = []
+        notes_index = {}
+        notes_cache_loaded = True
+        invalidate_stats_cache()
+        return notes_cache
     try:
         with open(NOTES_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -283,9 +352,26 @@ def read_notes_sync() -> list:
             for n in notes_list:
                 if not n.get("workspace"):
                     n["workspace"] = "default"
-            return notes_list
-    except Exception:
-        return []
+            notes_cache = notes_list
+            notes_index = {n["id"]: n for n in notes_cache if isinstance(n, dict) and "id" in n}
+            notes_cache_loaded = True
+            invalidate_stats_cache()
+            return notes_cache
+    except Exception as e:
+        print(f"Error loading notes into memory: {e}")
+        notes_cache = []
+        notes_index = {}
+        notes_cache_loaded = True
+        invalidate_stats_cache()
+        return notes_cache
+
+
+def read_notes_sync() -> list:
+    """Read all notes from in-memory cache, loading from disk on first call."""
+    global notes_cache, notes_cache_loaded
+    if not notes_cache_loaded:
+        return load_notes_into_memory()
+    return notes_cache
 
 
 def read_vault_meta() -> dict:
@@ -620,6 +706,9 @@ async def maintenance_loop():
 async def lifespan(app: FastAPI):
     init_storage()
     sync_from_persist_on_boot()
+    load_notes_into_memory()
+    load_workspaces_into_memory()
+    compute_stats_sync(vault_ok=False)
     asyncio.create_task(prune_expired_and_trash())
     task = asyncio.create_task(maintenance_loop())
     yield
@@ -627,6 +716,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="KeepBoard", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
+@app.middleware("http")
+async def add_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -728,14 +828,21 @@ async def health_check():
     }
 
 
-@app.get("/api/stats")
-async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
-    """Return storage metrics, note counts, RAM tmpfs utilization, and attachment health."""
-    async with notes_lock:
-        all_notes = read_notes_sync()
-        workspaces_data = read_workspaces_sync()
+@app.get("/api/sync-token")
+async def get_sync_token():
+    """Return lightweight monotonic server revision integer for cross-device sync (< 30 bytes)."""
+    return {"revision": server_sync_revision}
 
-    vault_ok = _validate_vault_token(x_vault_token)
+
+def compute_stats_sync(vault_ok: bool) -> dict:
+    """Compute and cache storage metrics and note counts directly from memory with zero file-tree walking."""
+    global cached_stats_data, stats_cache_dirty
+    if not stats_cache_dirty and vault_ok in cached_stats_data:
+        return cached_stats_data[vault_ok]
+
+    all_notes = read_notes_sync()
+    workspaces_data = read_workspaces_sync()
+
     notes_in_view = [n for n in all_notes if not n.get("is_vault") or vault_ok]
 
     active_notes = [n for n in notes_in_view if not (n.get("trashed") or n.get("is_trash")) and not (n.get("archived") or n.get("is_archived"))]
@@ -853,24 +960,17 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
     ram_total = RAM_LIMIT_BYTES
     ram_used = 0
     ram_free = RAM_LIMIT_BYTES
-    data_bytes = 0
     try:
         if os.path.exists(DATA_DIR):
             usage = shutil.disk_usage(DATA_DIR)
-            # If inside real tmpfs container where total is <= 2GB, use it; otherwise standard 1 GB capacity
             if 0 < usage.total <= 2 * 1024 * 1024 * 1024:
                 ram_total = usage.total
             ram_used = usage.used
             ram_free = usage.free
-            for root, dirs, files in os.walk(DATA_DIR):
-                for f in files:
-                    try:
-                        data_bytes += os.path.getsize(os.path.join(root, f))
-                    except Exception:
-                        pass
     except Exception:
         pass
 
+    data_bytes = active_notes_bytes + archived_notes_bytes + trashed_notes_bytes + total_files_bytes + orphaned_bytes
     if ram_used == 0 and data_bytes > 0:
         ram_used = data_bytes
 
@@ -878,7 +978,7 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
     persist_total = 0
     persist_used = 0
     persist_free = 0
-    persist_bytes = 0
+    persist_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in all_notes if n.get("saved_to_disk"))
     if is_persist_available():
         try:
             if os.path.exists(PERSIST_DIR):
@@ -886,16 +986,10 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
                 persist_total = p_usage.total
                 persist_used = p_usage.used
                 persist_free = p_usage.free
-                for root, dirs, files in os.walk(PERSIST_DIR):
-                    for f in files:
-                        try:
-                            persist_bytes += os.path.getsize(os.path.join(root, f))
-                        except Exception:
-                            pass
         except Exception:
             pass
 
-    return {
+    stats = {
         "ram_used": ram_used,
         "ram_total": ram_total,
         "ram_limit": RAM_LIMIT_BYTES,
@@ -934,6 +1028,17 @@ async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
         "disk_used": persist_used,
         "disk_total": persist_total
     }
+    cached_stats_data[vault_ok] = stats
+    stats_cache_dirty = False
+    return stats
+
+
+@app.get("/api/stats")
+async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
+    """Return storage metrics instantly from memory cache without disk I/O."""
+    vault_ok = _validate_vault_token(x_vault_token)
+    async with notes_lock:
+        return compute_stats_sync(vault_ok)
 
 
 @app.post("/api/stats/purge-orphans")
@@ -981,6 +1086,8 @@ async def purge_orphans():
                             purged_count += 1
                         except Exception:
                             pass
+
+        invalidate_stats_cache()
 
     asyncio.create_task(broadcast_event("notes_updated", {"action": "orphans_purged", "count": purged_count}))
     return {
@@ -2540,6 +2647,18 @@ async def vault_change(
 
 
 # ---------------------------------------------------------------------------
-# Serve Single-Page App
+# Serve Single-Page App with Caching Headers
 # ---------------------------------------------------------------------------
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+class CachedStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope) -> Response:
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            if path.endswith(".html") or not path or path == "/":
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            else:
+                response.headers["Cache-Control"] = "public, max-age=86400"
+        return response
+
+
+app.mount("/", CachedStaticFiles(directory=STATIC_DIR, html=True), name="static")

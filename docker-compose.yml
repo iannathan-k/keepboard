@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
     container_name: keepboard
     restart: unless-stopped
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
     tmpfs:
       - "/data:size=1G,uid=1000,gid=1000,mode=0755"
     # Optional persistent storage volume for cards marked "Save to Disk" (Shield icon)
