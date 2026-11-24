@@ -8,8 +8,13 @@ services:
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
+      - PYTHONMALLOC=malloc
     tmpfs:
       - "/data:size=1G,uid=1000,gid=1000,mode=0755"
+    # Hardware resource caps to guarantee minimal host footprint
+    mem_limit: 256m
+    mem_reservation: 32m
+    cpus: 0.50
     # Optional persistent storage volume for cards marked "Save to Disk" (Shield icon)
     # volumes:
     #   - keepboard-persist:/persist

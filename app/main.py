@@ -709,24 +709,50 @@ async def lifespan(app: FastAPI):
     load_notes_into_memory()
     load_workspaces_into_memory()
     compute_stats_sync(vault_ok=False)
+    # Collect and freeze startup objects for optimal memory and zero GC churn
+    import gc
+    gc.collect()
+    if hasattr(gc, "freeze"):
+        try:
+            gc.freeze()
+        except Exception:
+            pass
     asyncio.create_task(prune_expired_and_trash())
     task = asyncio.create_task(maintenance_loop())
     yield
     task.cancel()
 
 
+class CacheHeadersMiddleware:
+    """Ultra-low overhead raw ASGI middleware setting cache headers without Starlette BaseHTTPMiddleware Task wrapping."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"cache-control", b"no-cache, no-store, must-revalidate"))
+                headers.append((b"pragma", b"no-cache"))
+                headers.append((b"expires", b"0"))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
 app = FastAPI(title="KeepBoard", lifespan=lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=1024)
-
-
-@app.middleware("http")
-async def add_cache_headers(request: Request, call_next):
-    response = await call_next(request)
-    if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-    return response
+app.add_middleware(CacheHeadersMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
 # ---------------------------------------------------------------------------
@@ -834,11 +860,12 @@ async def get_sync_token():
     return {"revision": server_sync_revision}
 
 
-def compute_stats_sync(vault_ok: bool) -> dict:
+def compute_stats_sync(vault_ok: bool, include_orphans: bool = False) -> dict:
     """Compute and cache storage metrics and note counts directly from memory with zero file-tree walking."""
     global cached_stats_data, stats_cache_dirty
-    if not stats_cache_dirty and vault_ok in cached_stats_data:
-        return cached_stats_data[vault_ok]
+    cache_key = (vault_ok, include_orphans)
+    if not stats_cache_dirty and cache_key in cached_stats_data:
+        return cached_stats_data[cache_key]
 
     all_notes = read_notes_sync()
     workspaces_data = read_workspaces_sync()
@@ -855,10 +882,13 @@ def compute_stats_sync(vault_ok: bool) -> dict:
     archived_count = len(archived_notes)
     trashed_count = len(trashed_notes)
 
-    # Calculate RAM bytes breakdown
-    active_notes_bytes = sum(len(json.dumps(n, ensure_ascii=False).encode("utf-8")) for n in active_notes)
-    archived_notes_bytes = sum(len(json.dumps(n, ensure_ascii=False).encode("utf-8")) for n in archived_notes)
-    trashed_notes_bytes = sum(len(json.dumps(n, ensure_ascii=False).encode("utf-8")) for n in trashed_notes)
+    # Fast in-memory byte estimates (avoids heavy json.dumps serialization cycles)
+    def _estimate_note_bytes(n: dict) -> int:
+        return len(n.get("title", "")) + len(n.get("text", "") or n.get("content", "")) + (len(n.get("checklist", [])) * 48) + 160
+
+    active_notes_bytes = sum(_estimate_note_bytes(n) for n in active_notes)
+    archived_notes_bytes = sum(_estimate_note_bytes(n) for n in archived_notes)
+    trashed_notes_bytes = sum(_estimate_note_bytes(n) for n in trashed_notes)
 
     active_attachments_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in active_notes + archived_notes)
     trashed_attachments_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in trashed_notes)
@@ -867,7 +897,7 @@ def compute_stats_sync(vault_ok: bool) -> dict:
     total_files_bytes = active_attachments_bytes + trashed_attachments_bytes
     total_files_count = sum(len(n.get("attachments", [])) for n in all_notes)
 
-    # All attachments across all notes for top 3 largest inspector
+    # Attachments for top 3 largest inspector
     all_attachments_list = []
     valid_stored_names = set()
     for n in all_notes:
@@ -904,51 +934,52 @@ def compute_stats_sync(vault_ok: bool) -> dict:
             "bytes": ws_bytes
         })
 
-    # Detect Orphaned Files (files on disk not referenced in any note's attachments)
+    # Detect Orphaned Files ONLY when requested (e.g., Storage Inspector or purge-orphans)
     orphans = []
     seen_orphans = set()
-    if os.path.exists(FILES_DIR):
-        for fname in os.listdir(FILES_DIR):
-            if fname.startswith("."):
-                continue
-            if fname not in valid_stored_names:
-                fpath = os.path.join(FILES_DIR, fname)
-                if os.path.isfile(fpath):
-                    fsize = 0
-                    try:
-                        fsize = os.path.getsize(fpath)
-                    except Exception:
-                        pass
-                    orphans.append({
-                        "filename": fname,
-                        "size": fsize,
-                        "location": "ram"
-                    })
-                    seen_orphans.add(fname)
-
-    if is_persist_available() and os.path.exists(PERSIST_FILES_DIR):
-        for fname in os.listdir(PERSIST_FILES_DIR):
-            if fname.startswith("."):
-                continue
-            if fname not in valid_stored_names:
-                fpath = os.path.join(PERSIST_FILES_DIR, fname)
-                if os.path.isfile(fpath):
-                    fsize = 0
-                    try:
-                        fsize = os.path.getsize(fpath)
-                    except Exception:
-                        pass
-                    if fname in seen_orphans:
-                        for o in orphans:
-                            if o["filename"] == fname:
-                                o["location"] = "both"
-                                break
-                    else:
+    if include_orphans:
+        if os.path.exists(FILES_DIR):
+            for fname in os.listdir(FILES_DIR):
+                if fname.startswith("."):
+                    continue
+                if fname not in valid_stored_names:
+                    fpath = os.path.join(FILES_DIR, fname)
+                    if os.path.isfile(fpath):
+                        fsize = 0
+                        try:
+                            fsize = os.path.getsize(fpath)
+                        except Exception:
+                            pass
                         orphans.append({
                             "filename": fname,
                             "size": fsize,
-                            "location": "persist"
+                            "location": "ram"
                         })
+                        seen_orphans.add(fname)
+
+        if is_persist_available() and os.path.exists(PERSIST_FILES_DIR):
+            for fname in os.listdir(PERSIST_FILES_DIR):
+                if fname.startswith("."):
+                    continue
+                if fname not in valid_stored_names:
+                    fpath = os.path.join(PERSIST_FILES_DIR, fname)
+                    if os.path.isfile(fpath):
+                        fsize = 0
+                        try:
+                            fsize = os.path.getsize(fpath)
+                        except Exception:
+                            pass
+                        if fname in seen_orphans:
+                            for o in orphans:
+                                if o["filename"] == fname:
+                                    o["location"] = "both"
+                                    break
+                        else:
+                            orphans.append({
+                                "filename": fname,
+                                "size": fsize,
+                                "location": "persist"
+                            })
 
     orphaned_count = len(orphans)
     orphaned_bytes = sum(o["size"] for o in orphans)
@@ -956,23 +987,18 @@ def compute_stats_sync(vault_ok: bool) -> dict:
     # Standard tmpfs capacity (1 GB default target)
     RAM_LIMIT_BYTES = 1024 * 1024 * 1024
 
-    # Measure RAM tmpfs (/data) storage
+    # KeepBoard RAM utilization: exactly mirrors notes + attachments in volatile memory
+    data_bytes = active_notes_bytes + archived_notes_bytes + trashed_notes_bytes + total_files_bytes + orphaned_bytes
+    ram_used = data_bytes
     ram_total = RAM_LIMIT_BYTES
-    ram_used = 0
-    ram_free = RAM_LIMIT_BYTES
     try:
         if os.path.exists(DATA_DIR):
             usage = shutil.disk_usage(DATA_DIR)
             if 0 < usage.total <= 2 * 1024 * 1024 * 1024:
                 ram_total = usage.total
-            ram_used = usage.used
-            ram_free = usage.free
     except Exception:
         pass
-
-    data_bytes = active_notes_bytes + archived_notes_bytes + trashed_notes_bytes + total_files_bytes + orphaned_bytes
-    if ram_used == 0 and data_bytes > 0:
-        ram_used = data_bytes
+    ram_free = max(0, ram_total - ram_used)
 
     # Measure persistent disk (/persist) storage
     persist_total = 0
@@ -1028,17 +1054,20 @@ def compute_stats_sync(vault_ok: bool) -> dict:
         "disk_used": persist_used,
         "disk_total": persist_total
     }
-    cached_stats_data[vault_ok] = stats
+    cached_stats_data[cache_key] = stats
     stats_cache_dirty = False
     return stats
 
 
 @app.get("/api/stats")
-async def get_stats(x_vault_token: Optional[str] = Header(default=None)):
+async def get_stats(
+    orphans: bool = Query(False),
+    x_vault_token: Optional[str] = Header(default=None)
+):
     """Return storage metrics instantly from memory cache without disk I/O."""
     vault_ok = _validate_vault_token(x_vault_token)
     async with notes_lock:
-        return compute_stats_sync(vault_ok)
+        return compute_stats_sync(vault_ok, include_orphans=orphans)
 
 
 @app.post("/api/stats/purge-orphans")

@@ -544,7 +544,7 @@ async function checkSync() {
 
 function startAutoSync() {
   stopAutoSync();
-  syncPollInterval = setInterval(checkSync, 5000);
+  syncPollInterval = setInterval(checkSync, 20000);
 }
 
 function stopAutoSync() {
@@ -564,6 +564,12 @@ function initLiveSync() {
     } else {
       checkSync();
       startAutoSync();
+    }
+  });
+
+  window.addEventListener("focus", () => {
+    if (!document.hidden) {
+      checkSync();
     }
   });
 }
@@ -1597,21 +1603,29 @@ function renderComposerTags() {
   });
 }
 
-async function saveComposerNote() {
-  const title = composerTitleInput.value.trim();
-  const content = composerRawMode ? composerRawTextarea.value : composerRichEditor.innerHTML.trim();
+let isSavingComposer = false;
 
-  // If completely empty with no files or checklist, just collapse
-  if (
-    !title &&
-    !content &&
-    composerPendingFiles.length === 0 &&
-    composerChecklistItems.length === 0
-  ) {
+async function saveComposerNote() {
+  if (isSavingComposer) return;
+
+  const title = composerTitleInput.value.trim();
+  const textContent = (composerRichEditor.textContent || "").trim().replace(/\u200B/g, "");
+  const hasBodyContent = composerRawMode
+    ? composerRawTextarea.value.trim().length > 0
+    : textContent.length > 0;
+  const content = composerRawMode
+    ? composerRawTextarea.value.trim()
+    : (hasBodyContent ? composerRichEditor.innerHTML.trim() : "");
+  const hasChecklistContent = composerIsChecklist && composerChecklistItems.some(it => (it.text || "").trim().length > 0);
+  const hasFiles = composerPendingFiles && composerPendingFiles.length > 0;
+
+  // If completely empty with no files or checklist, just collapse without making a request
+  if (!title && !hasBodyContent && !hasChecklistContent && !hasFiles) {
     collapseComposer();
     return;
   }
 
+  isSavingComposer = true;
   const formData = new FormData();
   if (title) formData.append("title", title);
   if (content) {
@@ -1662,6 +1676,8 @@ async function saveComposerNote() {
     }
   } catch (err) {
     showToast("Network error creating note");
+  } finally {
+    isSavingComposer = false;
   }
 }
 
@@ -2543,7 +2559,7 @@ async function openStorageInspector() {
     storageInspectorBody.innerHTML = `<div style="text-align:center; padding:32px; color:var(--text-muted); font-size:13px;">Loading storage telemetry...</div>`;
   }
   try {
-    const res = await fetch("/api/stats", { headers: vaultHeaders() });
+    const res = await fetch("/api/stats?orphans=true", { headers: vaultHeaders() });
     if (res.ok) {
       const stats = await res.json();
       renderStorageInspector(stats);
@@ -3521,8 +3537,24 @@ function setupEventListeners() {
 
   // Composer Expansion & Collapse
   captureCollapsed.onclick = expandComposer;
-  composerCloseBtn.onclick = collapseComposer;
+  composerCloseBtn.onclick = saveComposerNote;
   composerSaveBtn.onclick = saveComposerNote;
+
+  // Auto-create and save note when clicking outside composer on background
+  document.addEventListener("mousedown", (e) => {
+    if (captureExpanded && captureExpanded.style.display === "flex") {
+      // If clicking inside capture-box or related dialogs, ignore
+      if (
+        captureBox.contains(e.target) ||
+        (tagPromptBackdrop && tagPromptBackdrop.contains(e.target)) ||
+        e.target.closest(".toast")
+      ) {
+        return;
+      }
+      // Clicked outside on background/canvas/etc. -> auto-create and save note
+      saveComposerNote();
+    }
+  });
 
   quickChecklistBtn.onclick = (e) => {
     e.stopPropagation();
@@ -4117,7 +4149,7 @@ function setupEventListeners() {
       } else if (selectedNoteIds.size > 0) {
         clearSelection();
       } else if (captureExpanded.style.display === "flex") {
-        collapseComposer();
+        saveComposerNote();
       }
     }
   });
@@ -4198,6 +4230,9 @@ function setupRubberbandSelection() {
 
   document.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
+    if (captureExpanded && captureExpanded.style.display === "flex") {
+      return;
+    }
     // Don't trigger if clicking inside card, modal, header, sidebar, capture box, or interactive controls
     if (e.target.closest(".card, .modal-backdrop, .app-header, .sidebar, .capture-box, .btn-icon, button, input, textarea, a, select, .workspace-popover, .card-more-popover, .color-popover, .toast, .trash-banner")) {
       return;

@@ -3,6 +3,7 @@ FROM python:3.12-alpine
 # Environment configuration
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONMALLOC=malloc \
     DATA_DIR=/data
 
 # Add curl for container health checks
@@ -34,4 +35,4 @@ HEALTHCHECK --interval=120s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/api/health || exit 1
 
 # Run Uvicorn server with 1 worker, no access logs, no reload
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--timeout-keep-alive", "30"]
