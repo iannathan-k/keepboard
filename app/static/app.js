@@ -3942,44 +3942,55 @@ function setupEventListeners() {
 
   modalCloseBtn.onclick = closeEditModal;
 
-  // Split Workspace
-  splitCloseBtn.onclick = () => {
-    closeAllSplitPanes();
-    loadNotes(false);
-  };
-
   // CLI Modal Snippets
-  headerCliBtn.onclick = () => (cliModalBackdrop.style.display = "flex");
-  cliCloseBtn.onclick = () => (cliModalBackdrop.style.display = "none");
-  cliDoneBtn.onclick = () => (cliModalBackdrop.style.display = "none");
-  cliCopy1.onclick = () => {
+  if (headerCliBtn) headerCliBtn.onclick = () => {
+    if (cliModalBackdrop) cliModalBackdrop.style.display = "flex";
+  };
+  if (cliCloseBtn) cliCloseBtn.onclick = () => {
+    if (cliModalBackdrop) cliModalBackdrop.style.display = "none";
+  };
+  if (cliDoneBtn) cliDoneBtn.onclick = () => {
+    if (cliModalBackdrop) cliModalBackdrop.style.display = "none";
+  };
+  if (cliModalBackdrop) {
+    cliModalBackdrop.addEventListener("click", (e) => {
+      if (e.target === cliModalBackdrop) cliModalBackdrop.style.display = "none";
+    });
+  }
+  if (cliCopy1) cliCopy1.onclick = () => {
     copyToClipboard(cliSnippet1.textContent);
     cliCopy1.textContent = "Copied!";
     setTimeout(() => (cliCopy1.textContent = "Copy"), 2000);
   };
-  cliCopy2.onclick = () => {
+  if (cliCopy2) cliCopy2.onclick = () => {
     copyToClipboard(cliSnippet2.textContent);
     cliCopy2.textContent = "Copied!";
     setTimeout(() => (cliCopy2.textContent = "Copy"), 2000);
   };
-  cliCopy3.onclick = () => {
+  if (cliCopy3) cliCopy3.onclick = () => {
     copyToClipboard(cliSnippet3.textContent);
     cliCopy3.textContent = "Copied!";
     setTimeout(() => (cliCopy3.textContent = "Copy"), 2000);
   };
 
   // QR Modal
-  qrCloseBtn.onclick = () => (qrModalBackdrop.style.display = "none");
+  if (qrCloseBtn) qrCloseBtn.onclick = () => {
+    if (qrModalBackdrop) qrModalBackdrop.style.display = "none";
+  };
 
   // Archive Peek Modal
-  archivePeekCloseBtn.onclick = () => (archivePeekBackdrop.style.display = "none");
-  archivePeekDoneBtn.onclick = () => (archivePeekBackdrop.style.display = "none");
-  archiveFilterInput.oninput = (e) => renderArchivePeekRows(e.target.value);
+  if (archivePeekCloseBtn) archivePeekCloseBtn.onclick = () => {
+    if (archivePeekBackdrop) archivePeekBackdrop.style.display = "none";
+  };
+  if (archivePeekDoneBtn) archivePeekDoneBtn.onclick = () => {
+    if (archivePeekBackdrop) archivePeekBackdrop.style.display = "none";
+  };
+  if (archiveFilterInput) archiveFilterInput.oninput = (e) => renderArchivePeekRows(e.target.value);
 
   // Vault Buttons
-  vaultSetupBtn.onclick = () => promptVaultPassword(true);
-  vaultUnlockBtn.onclick = () => promptVaultPassword(false);
-  vaultLockBtn.onclick = async () => {
+  if (vaultSetupBtn) vaultSetupBtn.onclick = () => promptVaultPassword(true);
+  if (vaultUnlockBtn) vaultUnlockBtn.onclick = () => promptVaultPassword(false);
+  if (vaultLockBtn) vaultLockBtn.onclick = async () => {
     try {
       await fetch("/api/vault/lock", {
         method: "POST",
@@ -3993,10 +4004,12 @@ function setupEventListeners() {
     updateVaultUI();
     loadNotes();
   };
-  vaultModalCancelBtn.onclick = () => (vaultModalBackdrop.style.display = "none");
+  if (vaultModalCancelBtn) vaultModalCancelBtn.onclick = () => {
+    if (vaultModalBackdrop) vaultModalBackdrop.style.display = "none";
+  };
 
   // Trash Empty Button
-  emptyTrashBtn.onclick = emptyTrash;
+  if (emptyTrashBtn) emptyTrashBtn.onclick = emptyTrash;
 
   // Full-Window Drag and Drop Anywhere
   setupGlobalDragDrop({
