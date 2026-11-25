@@ -6,9 +6,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONMALLOC=malloc \
     DATA_DIR=/data
 
-# Add curl for container health checks
-RUN apk add --no-cache curl
-
 # Create non-root user and group (UID 1000, GID 1000)
 RUN addgroup -g 1000 keepboard && \
     adduser -u 1000 -G keepboard -s /bin/sh -D keepboard && \
@@ -30,9 +27,5 @@ USER 1000:1000
 # Internal container port
 EXPOSE 8080
 
-# Container healthcheck (lightweight 120s interval check)
-HEALTHCHECK --interval=120s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8080/api/health || exit 1
-
-# Run Uvicorn server with 1 worker, no access logs, no reload
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--timeout-keep-alive", "30"]
+# Run Uvicorn server with 1 worker, no access logs, short keep-alive, no reload
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log", "--timeout-keep-alive", "5"]

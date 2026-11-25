@@ -19,8 +19,8 @@ from datetime import datetime
 from typing import Optional, List, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Query, Request, status
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Query, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
 from starlette.responses import Response
@@ -66,15 +66,17 @@ MAX_LINK_CACHE = 500
 # In-Memory Cache & Storage Metadata Index
 # ---------------------------------------------------------------------------
 notes_cache: list[dict] = []
-notes_index: dict[str, dict] = {}
 notes_cache_loaded: bool = False
 
 workspaces_cache: list[dict] = []
 workspaces_cache_loaded: bool = False
 
-cached_stats_data: dict[bool, dict] = {}
+cached_stats_data: dict[tuple[bool, bool], dict] = {}
 stats_cache_dirty: bool = True
 server_sync_revision: int = 1
+_persist_available_cached: Optional[bool] = None
+last_prune_ms: int = 0
+PRUNE_INTERVAL_MS = 3600 * 1000
 
 
 def invalidate_stats_cache():
@@ -90,22 +92,28 @@ def invalidate_stats_cache():
 # ---------------------------------------------------------------------------
 
 def is_persist_available() -> bool:
-    """Check if /persist directory is mounted and writable."""
+    """Check if /persist directory is mounted and writable (cached to avoid repeated disk syscalls)."""
+    global _persist_available_cached
+    if _persist_available_cached is not None:
+        return _persist_available_cached
     try:
         if not os.path.exists(PERSIST_DIR):
+            _persist_available_cached = False
             return False
         test_file = os.path.join(PERSIST_DIR, ".write_test")
         with open(test_file, "w") as f:
             f.write("ok")
         os.remove(test_file)
+        _persist_available_cached = True
         return True
     except Exception:
+        _persist_available_cached = False
         return False
 
 
 def _atomic_write(path: str, obj: Any):
     """Atomically write JSON to disk using a unique temporary file and fsync, updating in-memory cache."""
-    global notes_cache, notes_index, notes_cache_loaded, workspaces_cache, workspaces_cache_loaded, stats_cache_dirty
+    global notes_cache, notes_cache_loaded, workspaces_cache, workspaces_cache_loaded, stats_cache_dirty
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -131,7 +139,6 @@ def _atomic_write(path: str, obj: Any):
     # Synchronize in-memory cache directly on disk writes
     if path == NOTES_FILE and isinstance(obj, list):
         notes_cache = list(obj)
-        notes_index = {n["id"]: n for n in notes_cache if isinstance(n, dict) and "id" in n}
         notes_cache_loaded = True
         invalidate_stats_cache()
     elif path == WORKSPACES_FILE and isinstance(obj, list):
@@ -337,11 +344,10 @@ def mirror_note_to_persist(note: dict, remove: bool = False):
 
 
 def load_notes_into_memory() -> list:
-    """Load notes from disk into in-memory cache and index."""
-    global notes_cache, notes_index, notes_cache_loaded
+    """Load notes from disk into in-memory cache."""
+    global notes_cache, notes_cache_loaded
     if not os.path.exists(NOTES_FILE):
         notes_cache = []
-        notes_index = {}
         notes_cache_loaded = True
         invalidate_stats_cache()
         return notes_cache
@@ -353,14 +359,12 @@ def load_notes_into_memory() -> list:
                 if not n.get("workspace"):
                     n["workspace"] = "default"
             notes_cache = notes_list
-            notes_index = {n["id"]: n for n in notes_cache if isinstance(n, dict) and "id" in n}
             notes_cache_loaded = True
             invalidate_stats_cache()
             return notes_cache
     except Exception as e:
         print(f"Error loading notes into memory: {e}")
         notes_cache = []
-        notes_index = {}
         notes_cache_loaded = True
         invalidate_stats_cache()
         return notes_cache
@@ -399,14 +403,21 @@ def read_vault_meta() -> dict:
 # Server-Sent Events (SSE) Live Multi-Device Sync
 # ---------------------------------------------------------------------------
 
-async def broadcast_event(event_type: str, data: dict):
-    """Broadcast an update event to all active browser tabs/devices."""
+def notify_subscribers(event_type: str, data: dict):
+    """Push an update event only if SSE subscribers are connected (zero-cost no-op otherwise)."""
+    if not sse_subscribers:
+        return
     msg = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
     for queue in list(sse_subscribers):
         try:
             queue.put_nowait(msg)
         except Exception:
             sse_subscribers.discard(queue)
+
+
+async def broadcast_event(event_type: str, data: dict):
+    """Broadcast an update event to all active browser tabs/devices."""
+    notify_subscribers(event_type, data)
 
 
 # ---------------------------------------------------------------------------
@@ -655,8 +666,10 @@ def check_url_ssrf_safety(url_str: str) -> urllib.parse.ParseResult:
 # ---------------------------------------------------------------------------
 
 async def prune_expired_and_trash():
-    """Background task to delete 7-day-old trashed notes and expired ephemeral notes."""
+    """Lazily delete 7-day-old trashed notes and expired ephemeral notes (no background timer loop)."""
+    global last_prune_ms
     now = int(time.time() * 1000)
+    last_prune_ms = now
     async with notes_lock:
         notes = read_notes_sync()
         kept_notes = []
@@ -685,17 +698,13 @@ async def prune_expired_and_trash():
 
         if purged_count > 0:
             _atomic_write(NOTES_FILE, kept_notes)
-            await broadcast_event("notes_updated", {"action": "pruned", "count": purged_count})
+            notify_subscribers("notes_updated", {"action": "pruned", "count": purged_count})
 
 
-async def maintenance_loop():
-    """Periodic maintenance loop running every hour."""
-    while True:
-        try:
-            await prune_expired_and_trash()
-        except Exception:
-            pass
-        await asyncio.sleep(3600)
+async def maybe_lazy_prune():
+    """Run trash/TTL pruning at most once per hour on incoming requests instead of an idle background loop."""
+    if int(time.time() * 1000) - last_prune_ms >= PRUNE_INTERVAL_MS:
+        await prune_expired_and_trash()
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +717,7 @@ async def lifespan(app: FastAPI):
     sync_from_persist_on_boot()
     load_notes_into_memory()
     load_workspaces_into_memory()
+    await prune_expired_and_trash()
     compute_stats_sync(vault_ok=False)
     # Collect and freeze startup objects for optimal memory and zero GC churn
     import gc
@@ -717,10 +727,7 @@ async def lifespan(app: FastAPI):
             gc.freeze()
         except Exception:
             pass
-    asyncio.create_task(prune_expired_and_trash())
-    task = asyncio.create_task(maintenance_loop())
     yield
-    task.cancel()
 
 
 class CacheHeadersMiddleware:
@@ -856,8 +863,8 @@ async def health_check():
 
 @app.get("/api/sync-token")
 async def get_sync_token():
-    """Return lightweight monotonic server revision integer for cross-device sync (< 30 bytes)."""
-    return {"revision": server_sync_revision}
+    """Zero-allocation monotonic server revision response directly from memory (< 20 bytes)."""
+    return Response(content=f'{{"r":{server_sync_revision}}}', media_type="application/json")
 
 
 def compute_stats_sync(vault_ok: bool, include_orphans: bool = False) -> dict:
@@ -871,6 +878,7 @@ def compute_stats_sync(vault_ok: bool, include_orphans: bool = False) -> dict:
     workspaces_data = read_workspaces_sync()
 
     notes_in_view = [n for n in all_notes if not n.get("is_vault") or vault_ok]
+    locked_vault_notes = [n for n in all_notes if n.get("is_vault") and not vault_ok]
 
     active_notes = [n for n in notes_in_view if not (n.get("trashed") or n.get("is_trash")) and not (n.get("archived") or n.get("is_archived"))]
     archived_notes = [n for n in notes_in_view if (n.get("archived") or n.get("is_archived")) and not (n.get("trashed") or n.get("is_trash"))]
@@ -894,35 +902,46 @@ def compute_stats_sync(vault_ok: bool, include_orphans: bool = False) -> dict:
     trashed_attachments_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in trashed_notes)
     trash_total_bytes = trashed_notes_bytes + trashed_attachments_bytes
 
-    total_files_bytes = active_attachments_bytes + trashed_attachments_bytes
-    total_files_count = sum(len(n.get("attachments", [])) for n in all_notes)
+    # Aggregate locked Vault notes anonymously (never expose titles, filenames, or IDs while locked)
+    vault_locked_count = len(locked_vault_notes)
+    vault_locked_bytes = sum(
+        _estimate_note_bytes(n) + sum(att.get("size", 0) for att in n.get("attachments", []))
+        for n in locked_vault_notes
+    )
 
-    # Attachments for top 3 largest inspector
+    total_files_bytes = active_attachments_bytes + trashed_attachments_bytes
+    total_files_count = sum(len(n.get("attachments", [])) for n in notes_in_view)
+
+    # Attachments for top 3 largest inspector (strictly exclude locked Vault notes)
     all_attachments_list = []
     valid_stored_names = set()
     for n in all_notes:
+        is_note_vault = bool(n.get("is_vault"))
         n_title = (n.get("title") or "").strip() or "Untitled"
         for att in n.get("attachments", []):
             sname = att.get("stored_name")
             if sname:
                 valid_stored_names.add(sname)
+            if is_note_vault and not vault_ok:
+                continue
             all_attachments_list.append({
                 "id": att.get("id"),
                 "note_id": n.get("id"),
                 "note_title": n_title,
                 "filename": att.get("filename", "file.bin"),
                 "size": att.get("size", 0),
-                "content_type": att.get("content_type", "")
+                "content_type": att.get("content_type", ""),
+                "is_vault": is_note_vault
             })
 
     all_attachments_list.sort(key=lambda a: a.get("size", 0), reverse=True)
     top_attachments = all_attachments_list[:3]
 
-    # Workspace note and attachment counts
+    # Workspace note and attachment counts (exclude locked Vault notes while locked)
     workspace_stats = []
     for ws in workspaces_data:
         ws_id = ws["id"]
-        ws_notes = [n for n in all_notes if (n.get("workspace") or "default") == ws_id]
+        ws_notes = [n for n in notes_in_view if (n.get("workspace") or "default") == ws_id]
         ws_active = [n for n in ws_notes if not (n.get("trashed") or n.get("is_trash"))]
         ws_bytes = sum(sum(att.get("size", 0) for att in n.get("attachments", [])) for n in ws_notes)
         workspace_stats.append({
@@ -988,7 +1007,7 @@ def compute_stats_sync(vault_ok: bool, include_orphans: bool = False) -> dict:
     RAM_LIMIT_BYTES = 1024 * 1024 * 1024
 
     # KeepBoard RAM utilization: exactly mirrors notes + attachments in volatile memory
-    data_bytes = active_notes_bytes + archived_notes_bytes + trashed_notes_bytes + total_files_bytes + orphaned_bytes
+    data_bytes = active_notes_bytes + archived_notes_bytes + trashed_notes_bytes + total_files_bytes + vault_locked_bytes + orphaned_bytes
     ram_used = data_bytes
     ram_total = RAM_LIMIT_BYTES
     try:
@@ -1037,6 +1056,8 @@ def compute_stats_sync(vault_ok: bool, include_orphans: bool = False) -> dict:
         "archived_count": archived_count,
         "trashed_count": trashed_count,
         "vault_count": vault_count,
+        "vault_locked_count": vault_locked_count,
+        "vault_locked_bytes": vault_locked_bytes,
         "persist_count": persist_count,
         "total_notes": len(all_notes),
         "total_files_count": total_files_count,
@@ -1118,7 +1139,7 @@ async def purge_orphans():
 
         invalidate_stats_cache()
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "orphans_purged", "count": purged_count}))
+    notify_subscribers("notes_updated", {"action": "orphans_purged", "count": purged_count})
     return {
         "status": "purged",
         "purged_count": purged_count,
@@ -1168,6 +1189,7 @@ async def get_notes(
     x_vault_token: Optional[str] = Header(default=None)
 ):
     """Retrieve notes. If no view filter is specified or view='all', returns all notes (respecting vault authentication)."""
+    await maybe_lazy_prune()
     active_view = x_view or view or "all"
     vault_ok = _validate_vault_token(x_vault_token)
 
@@ -1200,6 +1222,22 @@ async def get_notes(
 
     filtered.sort(key=sort_key)
     return filtered
+
+
+@app.get("/api/notes/{note_id}")
+async def get_single_note(
+    note_id: str,
+    x_vault_token: Optional[str] = Header(default=None)
+):
+    """Retrieve a single note by ID, enforcing Vault authentication for locked notes."""
+    async with notes_lock:
+        notes = read_notes_sync()
+        target = next((n for n in notes if n["id"] == note_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    if target.get("is_vault") and not _validate_vault_token(x_vault_token):
+        raise HTTPException(status_code=403, detail="Vault authentication required.")
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -1320,7 +1358,7 @@ async def create_note(
         if saved_disk_bool:
             mirror_note_to_persist(new_note)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "created", "id": note_id, "workspace": new_note["workspace"]}))
+    notify_subscribers("notes_updated", {"action": "created", "id": note_id, "workspace": new_note["workspace"]})
     return new_note
 
 
@@ -1355,7 +1393,7 @@ async def duplicate_note(
         if copy_note.get("saved_to_disk"):
             mirror_note_to_persist(copy_note)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "duplicated", "id": copy_note["id"]}))
+    notify_subscribers("notes_updated", {"action": "duplicated", "id": copy_note["id"]})
     return copy_note
 
 
@@ -1419,7 +1457,9 @@ async def update_note(
             target["is_vault"] = payload.is_vault
             if payload.is_vault:
                 target["pinned"] = False
+                target["is_pinned"] = False
                 target["archived"] = False
+                target["is_archived"] = False
         if payload.saved_to_disk is not None:
             target["saved_to_disk"] = payload.saved_to_disk
         if payload.snoozed_until is not None:
@@ -1437,7 +1477,7 @@ async def update_note(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target, remove=not target.get("saved_to_disk"))
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "updated", "id": note_id, "workspace": target.get("workspace", "default")}))
+    notify_subscribers("notes_updated", {"action": "updated", "id": note_id, "workspace": target.get("workspace", "default")})
     return target
 
 
@@ -1462,7 +1502,7 @@ async def bump_note(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "bumped", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "bumped", "id": note_id})
     return {"status": "bumped", "id": note_id, "updated_at": now}
 
 
@@ -1487,7 +1527,7 @@ async def snooze_note(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "snoozed", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "snoozed", "id": note_id})
     return {"status": "snoozed", "id": note_id, "snoozed_until": snooze_ts}
 
 
@@ -1512,7 +1552,7 @@ async def toggle_persist(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target, remove=(not new_val))
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "persist_toggled", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "persist_toggled", "id": note_id})
     return {"id": note_id, "saved_to_disk": new_val}
 
 
@@ -1540,7 +1580,7 @@ async def restore_note(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "restored", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "restored", "id": note_id})
     return target
 
 
@@ -1583,7 +1623,7 @@ async def delete_note(
             mirror_note_to_persist(target)
             action_type = "trashed"
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": action_type, "id": note_id}))
+    notify_subscribers("notes_updated", {"action": action_type, "id": note_id})
     return {"status": action_type, "id": note_id}
 
 
@@ -1612,7 +1652,7 @@ async def empty_trash(x_vault_token: Optional[str] = Header(default=None)):
 
         _atomic_write(NOTES_FILE, kept_notes)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "trash_emptied", "purged_count": purged_count}))
+    notify_subscribers("notes_updated", {"action": "trash_emptied", "purged_count": purged_count})
     return {"status": "emptied", "purged_count": purged_count}
 
 
@@ -1700,7 +1740,7 @@ async def batch_action(
                 mirror_note_to_persist(n, remove=True)
             notes = [n for n in notes if n["id"] not in target_ids]
             _atomic_write(NOTES_FILE, notes)
-            asyncio.create_task(broadcast_event("notes_updated", {"action": "batch_deleted", "count": len(matching)}))
+            notify_subscribers("notes_updated", {"action": "batch_deleted", "count": len(matching)})
             return {"status": "deleted_forever", "count": len(matching)}
         elif req.action == "toggle_persist":
             for n in matching:
@@ -1782,7 +1822,7 @@ async def batch_action(
 
         _atomic_write(NOTES_FILE, notes)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "batch", "type": req.action}))
+    notify_subscribers("notes_updated", {"action": "batch", "type": req.action})
     return {"status": "ok", "action": req.action, "count": len(matching)}
 
 
@@ -1837,7 +1877,7 @@ async def reorder_notes(req: ReorderRequest):
             if n["id"] in id_to_order:
                 n["sort_order"] = id_to_order[n["id"]]
         _atomic_write(NOTES_FILE, notes)
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "reordered"}))
+    notify_subscribers("notes_updated", {"action": "reordered"})
     return {"status": "reordered"}
 
 
@@ -1875,7 +1915,7 @@ async def add_attachments(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "attachments_added", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "attachments_added", "id": note_id})
     return target
 
 
@@ -1912,7 +1952,7 @@ async def delete_attachment(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "attachment_deleted", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "attachment_deleted", "id": note_id})
     return target
 
 
@@ -1960,11 +2000,13 @@ async def serve_file(
     disp_type = "attachment" if download else "inline"
     safe_filename = target_att.get("filename", "file.bin")
 
+    resp_headers = {"Cache-Control": "private, no-store"} if is_vault else None
     return FileResponse(
         path=file_path,
         media_type=content_type,
         content_disposition_type=disp_type,
-        filename=safe_filename
+        filename=safe_filename,
+        headers=resp_headers
     )
 
 
@@ -2014,7 +2056,7 @@ async def transfer_attachment(
         mirror_note_to_persist(source)
         mirror_note_to_persist(target)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "transferred", "target_id": target_id}))
+    notify_subscribers("notes_updated", {"action": "transferred", "target_id": target_id})
     return {"status": "transferred", "attachment": att_to_move, "target_id": target_id}
 
 
@@ -2054,7 +2096,7 @@ async def rename_attachment(
         _atomic_write(NOTES_FILE, notes)
         mirror_note_to_persist(target)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "renamed_attachment", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "renamed_attachment", "id": note_id})
     return {"status": "renamed", "attachment": target_att}
 
 
@@ -2304,7 +2346,7 @@ async def direct_drop(
         notes.insert(0, new_note)
         _atomic_write(NOTES_FILE, notes)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "cli_dropped", "id": note_id}))
+    notify_subscribers("notes_updated", {"action": "cli_dropped", "id": note_id})
     return {
         "status": "ok",
         "id": note_id,
@@ -2469,7 +2511,7 @@ async def restore_backup(file: UploadFile = File(...)):
 
         _atomic_write(NOTES_FILE, existing_notes)
 
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "restored_backup"}))
+    notify_subscribers("notes_updated", {"action": "restored_backup"})
     return {"status": "restored", "restored_notes_count": restored_notes_count, "total_notes": len(existing_notes)}
 
 
@@ -2500,7 +2542,7 @@ async def create_workspace(payload: WorkspaceCreateRequest):
     new_ws = {"id": ws_id, "name": name}
     workspaces.append(new_ws)
     write_workspaces_sync(workspaces)
-    asyncio.create_task(broadcast_event("workspaces_updated", {"action": "created", "workspace": new_ws}))
+    notify_subscribers("workspaces_updated", {"action": "created", "workspace": new_ws})
     return new_ws
 
 
@@ -2516,7 +2558,7 @@ async def rename_workspace(workspace_id: str, payload: WorkspaceUpdateRequest):
         raise HTTPException(status_code=404, detail="Workspace not found.")
     target["name"] = name
     write_workspaces_sync(workspaces)
-    asyncio.create_task(broadcast_event("workspaces_updated", {"action": "renamed", "workspace": target}))
+    notify_subscribers("workspaces_updated", {"action": "renamed", "workspace": target})
     return target
 
 
@@ -2544,9 +2586,9 @@ async def delete_workspace(workspace_id: str):
         if moved_any:
             _atomic_write(NOTES_FILE, notes)
 
-    asyncio.create_task(broadcast_event("workspaces_updated", {"action": "deleted", "id": workspace_id}))
+    notify_subscribers("workspaces_updated", {"action": "deleted", "id": workspace_id})
     if moved_any:
-        asyncio.create_task(broadcast_event("notes_updated", {"action": "workspace_deleted_reassigned"}))
+        notify_subscribers("notes_updated", {"action": "workspace_deleted_reassigned"})
     return {"status": "deleted", "id": workspace_id}
 
 
@@ -2564,7 +2606,7 @@ async def move_note_workspace(note_id: str, payload: MoveWorkspaceRequest):
         _atomic_write(NOTES_FILE, notes)
         if target.get("saved_to_disk"):
             mirror_note_to_persist(target)
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "moved_workspace", "id": note_id, "workspace": target_ws}))
+    notify_subscribers("notes_updated", {"action": "moved_workspace", "id": note_id, "workspace": target_ws})
     return {"status": "ok", "id": note_id, "workspace": target_ws}
 
 
@@ -2586,7 +2628,7 @@ async def batch_move_workspace(payload: BatchMoveWorkspaceRequest):
                     mirror_note_to_persist(n)
         if count > 0:
             _atomic_write(NOTES_FILE, notes)
-    asyncio.create_task(broadcast_event("notes_updated", {"action": "batch_moved_workspace", "workspace": target_ws, "count": count}))
+    notify_subscribers("notes_updated", {"action": "batch_moved_workspace", "workspace": target_ws, "count": count})
     return {"status": "ok", "count": count, "workspace": target_ws}
 
 
@@ -2595,9 +2637,13 @@ async def batch_move_workspace(payload: BatchMoveWorkspaceRequest):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/vault/status")
-async def vault_status():
+async def vault_status(x_vault_token: Optional[str] = Header(default=None)):
     meta = read_vault_meta()
-    return {"configured": bool(meta.get("password_hash")), "ok": True}
+    return {
+        "configured": bool(meta.get("password_hash")),
+        "unlocked": _validate_vault_token(x_vault_token),
+        "ok": True
+    }
 
 
 @app.post("/api/vault/set-password")

@@ -17,7 +17,7 @@ import {
   renderChecklistEditor,
   convertTextToChecklist,
   convertChecklistToText,
-} from "./editor.js";
+} from "./editor.js?v=12";
 
 import {
   formatDateTimeStamp,
@@ -26,7 +26,7 @@ import {
   setupCardDropzone,
   createQRCodeSVG,
   initMedia,
-} from "./media.js";
+} from "./media.js?v=12";
 
 // ── Universal Clipboard Copy Helper with HTTP/Insecure Context Fallback ──────
 export async function copyToClipboard(text) {
@@ -426,6 +426,16 @@ function vaultHeaders() {
   return h;
 }
 
+function authFileUrl(attId, { download = false, isVault = false } = {}) {
+  const params = new URLSearchParams();
+  if (download) params.set("download", "true");
+  if (isVault && vaultToken) {
+    params.set("token", vaultToken);
+  }
+  const qs = params.toString();
+  return qs ? `/api/files/${attId}?${qs}` : `/api/files/${attId}`;
+}
+
 function isMediaFile(filename) {
   const ext = (filename || "").split(".").pop().toLowerCase();
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext)) return "image";
@@ -512,12 +522,15 @@ function updateStorageBadge(badgeEl, isDisk) {
   }
 }
 
-// ── Lightweight Monotonic Cross-Device Auto-Sync (<30 bytes, 0.00% Idle CPU) ─
+// ── Lightweight Monotonic Cross-Device Auto-Sync (<20 bytes, 0.00% Idle CPU) ─
 let clientSyncRevision = null;
-let syncPollInterval = null;
+let syncPollTimer = null;
+let syncBackoffMs = 15000;
+const SYNC_MIN_MS = 15000;
+const SYNC_MAX_MS = 60000;
 
 async function checkSync() {
-  if (document.hidden) return;
+  if (document.hidden || document.visibilityState !== "visible") return;
   const isModalOpen = editModalBackdrop && editModalBackdrop.style.display === "flex";
   const isComposerActive = captureExpanded && captureExpanded.style.display === "flex";
 
@@ -525,16 +538,21 @@ async function checkSync() {
     const res = await fetch("/api/sync-token", { headers: vaultHeaders() });
     if (!res.ok) return;
     const data = await res.json();
-    if (typeof data.revision === "number") {
+    const rev = typeof data.r === "number" ? data.r : data.revision;
+    if (typeof rev === "number") {
       if (clientSyncRevision === null) {
-        clientSyncRevision = data.revision;
-      } else if (data.revision > clientSyncRevision) {
-        clientSyncRevision = data.revision;
+        clientSyncRevision = rev;
+      } else if (rev > clientSyncRevision) {
+        clientSyncRevision = rev;
+        syncBackoffMs = SYNC_MIN_MS;
         // Re-fetch notes only if user is not actively editing inside modal or expanded composer
         if (!isModalOpen && !isComposerActive) {
           await loadNotes(false);
           await updateStats();
         }
+      } else {
+        // Step up backoff when idle with no remote changes (15s -> 30s -> 60s)
+        syncBackoffMs = Math.min(SYNC_MAX_MS, syncBackoffMs * 2);
       }
     }
   } catch (err) {
@@ -542,34 +560,53 @@ async function checkSync() {
   }
 }
 
-function startAutoSync() {
+function scheduleNextSync() {
   stopAutoSync();
-  syncPollInterval = setInterval(checkSync, 20000);
+  if (document.hidden || document.visibilityState !== "visible") return;
+  syncPollTimer = setTimeout(async () => {
+    syncPollTimer = null;
+    if (document.hidden || document.visibilityState !== "visible") return;
+    await checkSync();
+    scheduleNextSync();
+  }, syncBackoffMs);
+}
+
+function startAutoSync() {
+  syncBackoffMs = SYNC_MIN_MS;
+  scheduleNextSync();
 }
 
 function stopAutoSync() {
-  if (syncPollInterval) {
-    clearInterval(syncPollInterval);
-    syncPollInterval = null;
+  if (syncPollTimer) {
+    clearTimeout(syncPollTimer);
+    syncPollTimer = null;
   }
 }
 
 function initLiveSync() {
-  startAutoSync();
+  if (!document.hidden && document.visibilityState === "visible") {
+    startAutoSync();
+  }
 
-  // Pause completely when tab is hidden to achieve 0.00% idle CPU; resume and check immediately on focus
+  // Strictly zero network activity when hidden or unloading
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
+    if (document.hidden || document.visibilityState !== "visible") {
       stopAutoSync();
     } else {
+      syncBackoffMs = SYNC_MIN_MS;
       checkSync();
-      startAutoSync();
+      scheduleNextSync();
     }
   });
 
+  window.addEventListener("pagehide", stopAutoSync);
+  window.addEventListener("beforeunload", stopAutoSync);
+
   window.addEventListener("focus", () => {
-    if (!document.hidden) {
+    if (!document.hidden && document.visibilityState === "visible") {
+      syncBackoffMs = SYNC_MIN_MS;
       checkSync();
+      scheduleNextSync();
     }
   });
 }
@@ -1114,7 +1151,7 @@ function createCardElement(note) {
       const mediaBox = document.createElement("div");
       mediaBox.className = "card-media-preview";
 
-      const fileUrl = `/api/files/${firstMedia.id}`;
+      const fileUrl = authFileUrl(firstMedia.id, { isVault: Boolean(note.is_vault) });
       if (mediaType === "image") {
         const img = document.createElement("img");
         img.src = fileUrl;
@@ -1144,7 +1181,7 @@ function createCardElement(note) {
       pill.className = "attachment-pill";
 
       const link = document.createElement("a");
-      link.href = `/api/files/${att.id}?download=true`;
+      link.href = authFileUrl(att.id, { download: true, isVault: Boolean(note.is_vault) });
       link.className = "attachment-name";
       link.textContent = att.filename;
       link.title = `Download ${att.filename} (${formatBytes(att.size)})`;
@@ -1686,6 +1723,12 @@ async function openEditModal(noteId) {
   const note = allNotes.find((n) => n.id === noteId);
   if (!note) return;
 
+  if (note.is_vault && (!vaultUnlocked || !vaultToken)) {
+    showToast("Unlock Vault to open protected note");
+    promptVaultPassword(false, () => openEditModal(noteId));
+    return;
+  }
+
   currentEditingNoteId = note.id;
   modalTitleInput.value = note.title || "";
   modalRichEditor.innerHTML = note.content || "";
@@ -1769,22 +1812,29 @@ function renderModalTags() {
   });
 }
 
-function renderModalAttachments(attachments) {
-  modalAttachmentsList.innerHTML = "";
+function renderModalAttachments(attachments, targetContainer = modalAttachmentsList, isVault = null) {
+  const container = targetContainer || modalAttachmentsList;
+  if (!container) return;
+  const vaultFlag = isVault !== null
+    ? Boolean(isVault)
+    : Boolean(allNotes.find((n) => n.id === currentEditingNoteId)?.is_vault);
+  container.innerHTML = "";
   attachments.forEach((att) => {
     const pill = document.createElement("div");
     pill.className = "attachment-pill";
+    const dlUrl = authFileUrl(att.id, { download: true, isVault: vaultFlag });
     pill.innerHTML = `
       <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-      <a href="/api/files/${att.id}?download=true" class="attachment-name">${escapeHtml(att.filename)}</a>
+      <a href="${dlUrl}" class="attachment-name">${escapeHtml(att.filename)}</a>
       <span class="attachment-size">${formatBytes(att.size)}</span>
       <button class="attachment-action-btn" title="Delete attachment">✕</button>
     `;
     pill.querySelector(".attachment-action-btn").onclick = async (e) => {
       e.stopPropagation();
-      await deleteAttachment(currentEditingNoteId, att.id);
+      const targetNoteId = (container === modal2AttachmentsList && modal2NoteId) ? modal2NoteId : currentEditingNoteId;
+      await deleteAttachment(targetNoteId, att.id);
     };
-    modalAttachmentsList.appendChild(pill);
+    container.appendChild(pill);
   });
 }
 
@@ -1944,7 +1994,7 @@ function loadSecondNote(noteId) {
     modal2RichEditor.style.display = "block";
     modal2ChecklistItems = [];
   }
-  renderModalAttachments(note.attachments || [], modal2AttachmentsList);
+  renderModalAttachments(note.attachments || [], modal2AttachmentsList, Boolean(note.is_vault));
 }
 
 function debouncedSaveSecondNote() {
@@ -2185,6 +2235,7 @@ async function toggleNoteVault(noteId) {
       if (modalVaultBtn && currentEditingNoteId === noteId) {
         modalVaultBtn.classList.toggle("active", targetVaultState);
         modalVaultBtn.title = targetVaultState ? "Unlock from Vault" : "Lock in Vault (Protected)";
+        if (note) renderModalAttachments(note.attachments || [], modalAttachmentsList, targetVaultState);
       }
       await loadNotes(false);
     } else {
@@ -2471,7 +2522,7 @@ function renderArchivePeekRows(query) {
       <td style="word-break:break-all;">${escapeHtml(f.filename)}</td>
       <td style="font-family:var(--mono); color:var(--text-muted);">${formatBytes(f.size)}</td>
       <td>
-        <a href="/api/files/${archivePeekAttachmentId}/zip-extract?filename=${encodeURIComponent(f.filename)}" class="btn-secondary" style="padding:2px 8px; font-size:11px; text-decoration:none;">Extract</a>
+        <a href="/api/files/${archivePeekAttachmentId}/zip-extract?filename=${encodeURIComponent(f.filename)}${vaultToken ? `&token=${encodeURIComponent(vaultToken)}` : ""}" class="btn-secondary" style="padding:2px 8px; font-size:11px; text-decoration:none;">Extract</a>
       </td>
     `;
     archivePeekTbody.appendChild(tr);
@@ -2504,7 +2555,10 @@ async function loadNotes(showLoading = true) {
       // Keep local sync revision aligned with backend
       fetch("/api/sync-token", { headers: vaultHeaders() })
         .then(r => r.ok ? r.json() : null)
-        .then(d => { if (d && typeof d.revision === "number") clientSyncRevision = d.revision; })
+        .then(d => {
+          const rev = d ? (typeof d.r === "number" ? d.r : d.revision) : null;
+          if (typeof rev === "number") clientSyncRevision = rev;
+        })
         .catch(() => {});
     }
   } catch (err) {
@@ -2604,6 +2658,8 @@ function renderStorageInspector(stats) {
   const topAttachments = Array.isArray(stats.top_attachments) ? stats.top_attachments : [];
   const orphanedCount = Number(stats.orphaned_count || 0);
   const orphanedBytes = Number(stats.orphaned_bytes || 0);
+  const vaultLockedCount = Number(stats.vault_locked_count || 0);
+  const vaultLockedBytes = Number(stats.vault_locked_bytes || 0);
 
   let html = `
     <!-- 1. Volatile RAM (tmpfs /data) -->
@@ -2635,6 +2691,21 @@ function renderStorageInspector(stats) {
           <span class="inspector-stat-sub">${trashCount} notes</span>
         </div>
       </div>
+      ${vaultLockedCount > 0 ? `
+        <div class="inspector-item-row" style="margin-top:8px; border-color:rgba(250, 204, 21, 0.25);">
+          <div class="inspector-item-info">
+            <span class="inspector-item-name">🔒 Vault (Locked)</span>
+            <span class="inspector-item-meta">
+              <span>${vaultLockedCount} protected note${vaultLockedCount === 1 ? "" : "s"}</span>
+              <span>•</span>
+              <span style="font-family:var(--mono); color:#fff; font-weight:600;">${formatBytes(vaultLockedBytes)}</span>
+            </span>
+          </div>
+          <div class="inspector-actions-cell">
+            <button class="btn-secondary" id="inspector-unlock-vault-btn" style="padding:4px 10px; font-size:11.5px; color:var(--accent); border-color:var(--accent);">Unlock Vault</button>
+          </div>
+        </div>
+      ` : ""}
       <div class="inspector-footnote">* Note: RAM tmpfs and Trash are auto-purged on container restart & 7-day retention.</div>
     </div>
 
@@ -2696,22 +2767,31 @@ function renderStorageInspector(stats) {
       </div>
       ${topAttachments.length > 0 ? `
         <div style="display:flex; flex-direction:column; gap:6px;">
-          ${topAttachments.map(att => `
+          ${topAttachments.map(att => {
+            const isLockedItem = Boolean(att.is_locked) || (Boolean(att.is_vault) && !vaultUnlocked);
+            const displayFilename = isLockedItem ? "Locked Vault Attachment" : escapeHtml(att.filename);
+            const displayNoteTitle = isLockedItem ? "Locked Vault Note" : escapeHtml(att.note_title);
+            return `
             <div class="inspector-item-row">
               <div class="inspector-item-info">
-                <span class="inspector-item-name">${escapeHtml(att.filename)}</span>
+                <span class="inspector-item-name">${displayFilename}</span>
                 <span class="inspector-item-meta">
-                  <span>Note: "${escapeHtml(att.note_title)}"</span>
+                  <span>Note: "${displayNoteTitle}"</span>
                   <span>•</span>
                   <span style="font-family:var(--mono); color:#fff; font-weight:600;">${formatBytes(att.size)}</span>
                 </span>
               </div>
               <div class="inspector-actions-cell">
-                <button class="btn-secondary inspector-jump-btn" data-note-id="${att.note_id}" style="padding:4px 10px; font-size:11.5px;">Jump</button>
-                <button class="btn-danger inspector-del-att-btn" data-note-id="${att.note_id}" data-att-id="${att.id}" style="padding:4px 10px; font-size:11.5px;">Delete</button>
+                ${isLockedItem ? `
+                  <span class="inspector-stat-sub" style="color:var(--accent);">Locked</span>
+                ` : `
+                  <button class="btn-secondary inspector-jump-btn" data-note-id="${att.note_id}" data-is-vault="${att.is_vault ? "1" : "0"}" style="padding:4px 10px; font-size:11.5px;">Jump</button>
+                  <button class="btn-danger inspector-del-att-btn" data-note-id="${att.note_id}" data-att-id="${att.id}" style="padding:4px 10px; font-size:11.5px;">Delete</button>
+                `}
               </div>
             </div>
-          `).join("")}
+          `;
+          }).join("")}
         </div>
       ` : `
         <div class="clean-healthy-box">No attachments currently stored.</div>
@@ -2746,11 +2826,27 @@ function renderStorageInspector(stats) {
 
   storageInspectorBody.innerHTML = html;
 
+  // Wire Unlock Vault button in Storage Inspector
+  const inspectorUnlockBtn = document.getElementById("inspector-unlock-vault-btn");
+  if (inspectorUnlockBtn) {
+    inspectorUnlockBtn.onclick = () => {
+      closeStorageInspector();
+      promptVaultPassword(false, () => openStorageInspector());
+    };
+  }
+
   // Wire Jump buttons
   storageInspectorBody.querySelectorAll(".inspector-jump-btn").forEach(btn => {
     btn.onclick = () => {
       const noteId = btn.dataset.noteId;
+      const isVaultItem = btn.dataset.isVault === "1";
+      const noteObj = allNotes.find((n) => n.id === noteId);
+      const needsUnlock = (isVaultItem || (noteObj && noteObj.is_vault)) && (!vaultUnlocked || !vaultToken);
       closeStorageInspector();
+      if (needsUnlock) {
+        promptVaultPassword(false, () => openEditModal(noteId));
+        return;
+      }
       if (noteId) {
         openEditModal(noteId);
       }
@@ -3065,10 +3161,17 @@ function renderSidebarTags() {
 // ── Vault Auth & Status ────────────────────────────────────────────────────
 async function checkVaultStatus() {
   try {
-    const res = await fetch("/api/vault/status");
+    const res = await fetch("/api/vault/status", { headers: vaultHeaders() });
     if (res.ok) {
       const data = await res.json();
       vaultConfigured = Boolean(data.configured);
+      if (data.unlocked === false && vaultToken) {
+        vaultToken = null;
+        sessionStorage.removeItem("keepboard_vault_token");
+        vaultUnlocked = false;
+      } else if (data.unlocked === true) {
+        vaultUnlocked = true;
+      }
       updateVaultUI();
     }
   } catch (err) {
@@ -3162,6 +3265,12 @@ function promptVaultPassword(isSetup = false, onSuccess = null) {
         showToast("Vault unlocked");
         updateVaultUI();
         await loadNotes();
+        if (editModalBackdrop && editModalBackdrop.style.display === "flex" && currentEditingNoteId) {
+          const curNote = allNotes.find((n) => n.id === currentEditingNoteId);
+          if (curNote) {
+            renderModalAttachments(curNote.attachments || [], modalAttachmentsList, Boolean(curNote.is_vault));
+          }
+        }
         if (typeof onSuccess === "function") {
           onSuccess();
         }
@@ -4228,10 +4337,12 @@ function setupEventListeners() {
     }
   };
 
-  // Window resize re-balance masonry
+  // Window resize re-balance masonry (debounced to prevent DOM churn)
+  let resizeTimer = null;
   window.addEventListener("resize", () => {
-    renderNotesGrid();
-  });
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => renderNotesGrid(), 150);
+  }, { passive: true });
 }
 
 // ── Canvas Rubber-Band Lasso Selection ─────────────────────────────────────
