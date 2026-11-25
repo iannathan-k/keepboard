@@ -528,6 +528,7 @@ async def save_uploaded_file(upload_file: UploadFile) -> dict:
         "stored_name": stored_name,
         "size": total_size,
         "content_type": content_type,
+        "hide_preview": False,
         "created_at": int(time.time() * 1000)
     }
 
@@ -784,8 +785,13 @@ class NoteUpdateRequest(BaseModel):
     snoozed_until: Optional[int] = None
     checklist: Optional[list] = None
     tags: Optional[list] = None
+    attachments: Optional[list] = None
     sort_order: Optional[int] = None
     workspace: Optional[str] = None
+
+
+class AttachmentUpdateRequest(BaseModel):
+    hide_preview: Optional[bool] = None
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -1468,6 +1474,18 @@ async def update_note(
             target["checklist"] = payload.checklist
         if payload.tags is not None:
             target["tags"] = payload.tags
+        if payload.attachments is not None:
+            # Preserve binary metadata while updating per-attachment flags (e.g. hide_preview)
+            existing_by_id = {a.get("id"): a for a in target.get("attachments", []) if isinstance(a, dict)}
+            merged_atts = []
+            for inc in payload.attachments:
+                if not isinstance(inc, dict) or inc.get("id") not in existing_by_id:
+                    continue
+                cur = dict(existing_by_id[inc["id"]])
+                if "hide_preview" in inc:
+                    cur["hide_preview"] = bool(inc["hide_preview"])
+                merged_atts.append(cur)
+            target["attachments"] = merged_atts
         if payload.sort_order is not None:
             target["sort_order"] = payload.sort_order
         if payload.workspace is not None:
@@ -2098,6 +2116,42 @@ async def rename_attachment(
 
     notify_subscribers("notes_updated", {"action": "renamed_attachment", "id": note_id})
     return {"status": "renamed", "attachment": target_att}
+
+
+@app.patch("/api/notes/{note_id}/attachments/{attachment_id}")
+@app.put("/api/notes/{note_id}/attachments/{attachment_id}")
+async def update_attachment_metadata(
+    note_id: str,
+    attachment_id: str,
+    req: AttachmentUpdateRequest,
+    x_vault_token: Optional[str] = Header(default=None)
+):
+    """Update per-attachment metadata flags (e.g., hide_preview) without touching the binary file."""
+    now = int(time.time() * 1000)
+    async with notes_lock:
+        notes = read_notes_sync()
+        target = next((n for n in notes if n["id"] == note_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Note not found.")
+
+        if target.get("is_vault") and not _validate_vault_token(x_vault_token):
+            raise HTTPException(status_code=403, detail="Vault authentication required.")
+
+        target_att = next((a for a in target.get("attachments", []) if a["id"] == attachment_id), None)
+        if not target_att:
+            raise HTTPException(status_code=404, detail="Attachment not found.")
+
+        if req.hide_preview is not None:
+            target_att["hide_preview"] = bool(req.hide_preview)
+        else:
+            target_att["hide_preview"] = not bool(target_att.get("hide_preview", False))
+
+        target["updated_at"] = now
+        _atomic_write(NOTES_FILE, notes)
+        mirror_note_to_persist(target)
+
+    notify_subscribers("notes_updated", {"action": "attachment_updated", "id": note_id})
+    return {"status": "ok", "attachment": target_att}
 
 
 # ---------------------------------------------------------------------------

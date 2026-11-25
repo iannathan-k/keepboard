@@ -17,7 +17,7 @@ import {
   renderChecklistEditor,
   convertTextToChecklist,
   convertChecklistToText,
-} from "./editor.js?v=12";
+} from "./editor.js?v=14";
 
 import {
   formatDateTimeStamp,
@@ -26,7 +26,7 @@ import {
   setupCardDropzone,
   createQRCodeSVG,
   initMedia,
-} from "./media.js?v=12";
+} from "./media.js?v=14";
 
 // ── Universal Clipboard Copy Helper with HTTP/Insecure Context Fallback ──────
 export async function copyToClipboard(text) {
@@ -436,8 +436,15 @@ function authFileUrl(attId, { download = false, isVault = false } = {}) {
   return qs ? `/api/files/${attId}?${qs}` : `/api/files/${attId}`;
 }
 
-function isMediaFile(filename) {
-  const ext = (filename || "").split(".").pop().toLowerCase();
+function isMediaFile(attOrFilename) {
+  if (attOrFilename && typeof attOrFilename === "object") {
+    const mime = (attOrFilename.mime_type || attOrFilename.content_type || "").toLowerCase();
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+  }
+  const fname = typeof attOrFilename === "string" ? attOrFilename : (attOrFilename?.filename || "");
+  const ext = fname.split(".").pop().toLowerCase();
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext)) return "image";
   if (["mp4", "webm", "mov", "m4v"].includes(ext)) return "video";
   if (["mp3", "wav", "ogg", "aac", "m4a", "webm"].includes(ext)) return "audio";
@@ -1145,9 +1152,9 @@ function createCardElement(note) {
 
   // ── Media Attachments Preview ────────────────────────────────────────────
   if (note.attachments && note.attachments.length > 0) {
-    const firstMedia = note.attachments.find((a) => isMediaFile(a.filename));
+    const firstMedia = note.attachments.find((a) => isMediaFile(a) && !a.hide_preview);
     if (firstMedia) {
-      const mediaType = isMediaFile(firstMedia.filename);
+      const mediaType = isMediaFile(firstMedia);
       const mediaBox = document.createElement("div");
       mediaBox.className = "card-media-preview";
 
@@ -1764,14 +1771,14 @@ async function openEditModal(noteId) {
   setupCardDropzone(editModalCard, () => currentEditingNoteId, {
     onAttachmentsUploaded: (updated) => {
       const refreshed = allNotes.find((n) => n.id === currentEditingNoteId) || updated;
-      if (refreshed) renderModalAttachments(refreshed.attachments || []);
+      if (refreshed) renderModalAttachments(refreshed.attachments || [], modalAttachmentsList, Boolean(refreshed.is_vault));
     },
     showToast,
     vaultHeaders,
   });
 
   renderModalTags();
-  renderModalAttachments(note.attachments || []);
+  renderModalAttachments(note.attachments || [], modalAttachmentsList, Boolean(note.is_vault));
 
   if (note.is_checklist && modalChecklistItems.length > 0) {
     modalChecklistContainer.style.display = "block";
@@ -1812,30 +1819,181 @@ function renderModalTags() {
   });
 }
 
+function openImageLightbox(imgUrl, filename, downloadUrl) {
+  const backdrop = document.getElementById("image-lightbox-backdrop");
+  const imgEl = document.getElementById("lightbox-img");
+  const nameEl = document.getElementById("lightbox-filename");
+  const dlEl = document.getElementById("lightbox-download-btn");
+  const closeEl = document.getElementById("lightbox-close-btn");
+  if (!backdrop || !imgEl) return;
+
+  imgEl.src = imgUrl;
+  imgEl.alt = filename || "Image";
+  if (nameEl) nameEl.textContent = filename || "";
+  if (dlEl) dlEl.href = downloadUrl || imgUrl;
+  backdrop.style.display = "flex";
+
+  if (closeEl) closeEl.onclick = closeImageLightbox;
+  backdrop.onclick = (e) => {
+    if (e.target === backdrop) closeImageLightbox();
+  };
+}
+
+function closeImageLightbox() {
+  const backdrop = document.getElementById("image-lightbox-backdrop");
+  const imgEl = document.getElementById("lightbox-img");
+  if (backdrop) backdrop.style.display = "none";
+  if (imgEl) imgEl.src = "";
+}
+
 function renderModalAttachments(attachments, targetContainer = modalAttachmentsList, isVault = null) {
   const container = targetContainer || modalAttachmentsList;
   if (!container) return;
+  const list = Array.isArray(attachments) ? attachments : [];
   const vaultFlag = isVault !== null
     ? Boolean(isVault)
     : Boolean(allNotes.find((n) => n.id === currentEditingNoteId)?.is_vault);
   container.innerHTML = "";
-  attachments.forEach((att) => {
+
+  if (list.length === 0) {
+    container.style.display = "none";
+    return;
+  }
+  container.style.display = "flex";
+
+  // 1. Media Preview Gallery (Images, Video, Audio — skip items with hide_preview)
+  const mediaItems = list.filter((att) => isMediaFile(att) && !att.hide_preview);
+  if (mediaItems.length > 0) {
+    const gallery = document.createElement("div");
+    gallery.className = "modal-media-gallery";
+    mediaItems.forEach((att) => {
+      const mediaType = isMediaFile(att);
+      const item = document.createElement("div");
+      item.className = "modal-media-item";
+      const fileUrl = authFileUrl(att.id, { isVault: vaultFlag });
+      const dlUrl = authFileUrl(att.id, { download: true, isVault: vaultFlag });
+
+      if (mediaType === "image") {
+        const img = document.createElement("img");
+        img.src = fileUrl;
+        img.alt = att.filename || "Image";
+        img.loading = "lazy";
+        img.title = "Click to view full size";
+        img.onclick = (e) => {
+          e.stopPropagation();
+          openImageLightbox(fileUrl, att.filename, dlUrl);
+        };
+        item.appendChild(img);
+      } else if (mediaType === "video") {
+        const vid = document.createElement("video");
+        vid.src = fileUrl;
+        vid.controls = true;
+        vid.preload = "metadata";
+        item.appendChild(vid);
+      } else if (mediaType === "audio") {
+        const aud = document.createElement("audio");
+        aud.src = fileUrl;
+        aud.controls = true;
+        item.appendChild(aud);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "modal-media-actions";
+
+      const hideBtn = document.createElement("button");
+      hideBtn.type = "button";
+      hideBtn.className = "modal-media-action-btn";
+      hideBtn.title = "Hide preview (keep as file)";
+      hideBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46A11.804 11.804 0 0 0 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg><span>Hide</span>`;
+      hideBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const targetNoteId = (container === modal2AttachmentsList && modal2NoteId) ? modal2NoteId : currentEditingNoteId;
+        await toggleAttachmentPreview(targetNoteId, att.id, true);
+      };
+      actions.appendChild(hideBtn);
+
+      const dlBtn = document.createElement("a");
+      dlBtn.href = dlUrl;
+      dlBtn.className = "modal-media-action-btn";
+      dlBtn.textContent = "Download";
+      dlBtn.title = `Download ${att.filename}`;
+      dlBtn.onclick = (e) => e.stopPropagation();
+      actions.appendChild(dlBtn);
+
+      const rmBtn = document.createElement("button");
+      rmBtn.type = "button";
+      rmBtn.className = "modal-media-action-btn danger";
+      rmBtn.title = "Remove attachment";
+      rmBtn.textContent = "✕";
+      rmBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const targetNoteId = (container === modal2AttachmentsList && modal2NoteId) ? modal2NoteId : currentEditingNoteId;
+        await deleteAttachment(targetNoteId, att.id);
+      };
+      actions.appendChild(rmBtn);
+
+      item.appendChild(actions);
+      gallery.appendChild(item);
+    });
+    container.appendChild(gallery);
+  }
+
+  // 2. Attachment Pills Row (Compact file chips, Show preview toggle when hidden, Download & Remove)
+  const pillsRow = document.createElement("div");
+  pillsRow.className = "attachment-pills-row";
+  list.forEach((att) => {
     const pill = document.createElement("div");
     pill.className = "attachment-pill";
     const dlUrl = authFileUrl(att.id, { download: true, isVault: vaultFlag });
+    const mediaType = isMediaFile(att);
+    const isHiddenMedia = Boolean(mediaType && att.hide_preview);
+    const iconSvg = mediaType === "image"
+      ? `<svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>`
+      : `<svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>`;
+
     pill.innerHTML = `
-      <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-      <a href="${dlUrl}" class="attachment-name">${escapeHtml(att.filename)}</a>
+      ${iconSvg}
+      <a href="${dlUrl}" class="attachment-name" title="Download ${escapeHtml(att.filename)}">${escapeHtml(att.filename)}</a>
       <span class="attachment-size">${formatBytes(att.size)}</span>
-      <button class="attachment-action-btn" title="Delete attachment">✕</button>
     `;
-    pill.querySelector(".attachment-action-btn").onclick = async (e) => {
+
+    if (isHiddenMedia) {
+      const showBtn = document.createElement("button");
+      showBtn.type = "button";
+      showBtn.className = "attachment-pill-icon-btn";
+      showBtn.title = "Show preview";
+      showBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>`;
+      showBtn.onclick = async (e) => {
+        e.stopPropagation();
+        const targetNoteId = (container === modal2AttachmentsList && modal2NoteId) ? modal2NoteId : currentEditingNoteId;
+        await toggleAttachmentPreview(targetNoteId, att.id, false);
+      };
+      pill.appendChild(showBtn);
+    }
+
+    const dlIcon = document.createElement("a");
+    dlIcon.href = dlUrl;
+    dlIcon.className = "attachment-pill-icon-btn";
+    dlIcon.title = `Download ${att.filename}`;
+    dlIcon.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>`;
+    dlIcon.onclick = (e) => e.stopPropagation();
+    pill.appendChild(dlIcon);
+
+    const rmBtn = document.createElement("button");
+    rmBtn.type = "button";
+    rmBtn.className = "attachment-action-btn";
+    rmBtn.title = "Remove attachment";
+    rmBtn.textContent = "✕";
+    rmBtn.onclick = async (e) => {
       e.stopPropagation();
       const targetNoteId = (container === modal2AttachmentsList && modal2NoteId) ? modal2NoteId : currentEditingNoteId;
       await deleteAttachment(targetNoteId, att.id);
     };
-    container.appendChild(pill);
+    pill.appendChild(rmBtn);
+
+    pillsRow.appendChild(pill);
   });
+  container.appendChild(pillsRow);
 }
 
 async function closeEditModal() {
@@ -3105,6 +3263,38 @@ async function uploadFilesToNote(noteId, files) {
   await updateStats();
 }
 
+async function toggleAttachmentPreview(noteId, attachmentId, hidePreview) {
+  if (!noteId || !attachmentId) return;
+  const note = allNotes.find((n) => n.id === noteId);
+  if (note && Array.isArray(note.attachments)) {
+    const att = note.attachments.find((a) => a.id === attachmentId);
+    if (att) {
+      att.hide_preview = Boolean(hidePreview);
+    }
+    if (noteId === currentEditingNoteId) {
+      renderModalAttachments(note.attachments, modalAttachmentsList, Boolean(note.is_vault));
+    }
+    if (noteId === modal2NoteId) {
+      renderModalAttachments(note.attachments, modal2AttachmentsList, Boolean(note.is_vault));
+    }
+    renderNotesGrid();
+  }
+
+  try {
+    const res = await fetch(`/api/notes/${noteId}/attachments/${attachmentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...vaultHeaders() },
+      body: JSON.stringify({ hide_preview: Boolean(hidePreview) }),
+    });
+    if (!res.ok) {
+      showToast("Failed to update attachment preview setting");
+      await loadNotes(false);
+    }
+  } catch (err) {
+    showToast("Error updating attachment preview setting");
+  }
+}
+
 async function deleteAttachment(noteId, attachmentId) {
   await fetch(`/api/notes/${noteId}/attachments/${attachmentId}`, {
     method: "DELETE",
@@ -3114,7 +3304,10 @@ async function deleteAttachment(noteId, attachmentId) {
   await loadNotes(false);
   await updateStats();
   const updated = allNotes.find((n) => n.id === noteId);
-  if (updated) renderModalAttachments(updated.attachments || []);
+  if (updated) {
+    if (noteId === currentEditingNoteId) renderModalAttachments(updated.attachments || [], modalAttachmentsList, Boolean(updated.is_vault));
+    if (noteId === modal2NoteId) renderModalAttachments(updated.attachments || [], modal2AttachmentsList, Boolean(updated.is_vault));
+  }
 }
 
 async function renameAttachment(noteId, attachmentId, newFilename) {
@@ -4252,7 +4445,10 @@ function setupEventListeners() {
         const sdb = document.getElementById("sidebar-drawer-backdrop");
         if (sdb) sdb.classList.remove("show");
       }
-      if (cmdPaletteBackdrop.style.display === "flex") {
+      const lb = document.getElementById("image-lightbox-backdrop");
+      if (lb && lb.style.display === "flex") {
+        closeImageLightbox();
+      } else if (cmdPaletteBackdrop.style.display === "flex") {
         closeCommandPalette();
       } else if (storageInspectorBackdrop && storageInspectorBackdrop.style.display === "flex") {
         closeStorageInspector();

@@ -1507,12 +1507,158 @@ main.sidebar-collapsed {
   outline: none;
 }
 
-/* ── Attachment Download Pills ───────────────────────────────────────────── */
+/* ── Attachment Download Pills & Modal Media Gallery ────────────────────── */
 .attachment-list {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 4px;
+}
+#modal-attachments-list,
+#modal2-attachments-list {
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.modal-media-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+.modal-media-item {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0d0e10;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-media-item img {
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  display: block;
+  cursor: zoom-in;
+  background: #0d0e10;
+}
+.modal-media-item video {
+  width: 100%;
+  max-height: 320px;
+  display: block;
+}
+.modal-media-item audio {
+  width: 100%;
+  height: 40px;
+}
+.modal-media-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.modal-media-item:hover .modal-media-actions,
+.modal-media-item:focus-within .modal-media-actions {
+  opacity: 1;
+}
+.modal-media-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(20, 21, 23, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.modal-media-action-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+.modal-media-action-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(30, 32, 35, 0.96);
+}
+.modal-media-action-btn.danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.attachment-pill-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  text-decoration: none;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.attachment-pill-icon-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+.attachment-pill-icon-btn:hover {
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.06);
+}
+.attachment-pills-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#image-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 11, 13, 0.9);
+  backdrop-filter: blur(8px);
+  z-index: 2000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.lightbox-content {
+  position: relative;
+  max-width: 92vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.lightbox-content img {
+  max-width: 90vw;
+  max-height: 80vh;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  object-fit: contain;
+}
+.lightbox-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 6px 14px;
+  border-radius: 999px;
 }
 .attachment-pill {
   display: inline-flex;
