@@ -17,7 +17,7 @@ import {
   renderChecklistEditor,
   convertTextToChecklist,
   convertChecklistToText,
-} from "./editor.js?v=16";
+} from "./editor.js?v=17";
 
 import {
   formatDateTimeStamp,
@@ -26,7 +26,7 @@ import {
   setupCardDropzone,
   createQRCodeSVG,
   initMedia,
-} from "./media.js?v=16";
+} from "./media.js?v=17";
 
 // ── Universal Clipboard Copy Helper with HTTP/Insecure Context Fallback ──────
 export async function copyToClipboard(text) {
