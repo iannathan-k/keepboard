@@ -9,6 +9,8 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - PYTHONMALLOC=malloc
+      - KEEPBOARD_PASSWORD=${KEEPBOARD_PASSWORD:-keepboard}
+      - KEEPBOARD_SECRET=${KEEPBOARD_SECRET:-keepboard-change-this-secret}
     tmpfs:
       - "/data:size=1G,uid=1000,gid=1000,mode=0755"
     # Hardware resource caps to guarantee minimal host footprint

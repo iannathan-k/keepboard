@@ -7,6 +7,7 @@ import time
 import shutil
 import zipfile
 import secrets
+import hmac
 import hashlib
 import asyncio
 import mimetypes
@@ -48,6 +49,55 @@ DEFAULT_WORKSPACES = [{"id": "default", "name": "Personal"}]
 # In-memory vault session tokens (token -> expiry_ms)
 vault_sessions: dict[str, int] = {}
 VAULT_SESSION_TTL_MS = 24 * 60 * 60 * 1000  # 24 hours
+
+# Single-password app authentication
+KEEPBOARD_PASSWORD = os.getenv("KEEPBOARD_PASSWORD", "")
+_raw_secret = os.getenv("KEEPBOARD_SECRET", "")
+KEEPBOARD_SECRET_BYTES = (_raw_secret if _raw_secret else secrets.token_hex(32)).encode("utf-8")
+AUTH_COOKIE_NAME = "keepboard_session"
+AUTH_COOKIE_MAX_AGE = 2592000  # 30 days in seconds
+
+
+def _create_session_cookie_value() -> str:
+    """Create an HMAC-SHA256 signed session token valid for 30 days."""
+    exp_ts = int(time.time()) + AUTH_COOKIE_MAX_AGE
+    nonce = secrets.token_hex(12)
+    payload = f"{exp_ts}.{nonce}"
+    sig = hmac.new(KEEPBOARD_SECRET_BYTES, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_session_cookie(token: Optional[str]) -> bool:
+    """Verify HMAC-SHA256 signature and expiration of the session cookie."""
+    if not KEEPBOARD_PASSWORD:
+        return True
+    if not token:
+        return False
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    exp_str, nonce, sig = parts
+    if not exp_str.isdigit() or not nonce or not sig:
+        return False
+    if int(exp_str) <= int(time.time()):
+        return False
+    payload = f"{exp_str}.{nonce}"
+    expected_sig = hmac.new(KEEPBOARD_SECRET_BYTES, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected_sig, sig)
+
+
+def _extract_cookie(headers: list[tuple[bytes, bytes]], name: str) -> Optional[str]:
+    """Extract a named cookie from raw ASGI request headers."""
+    for k, v in headers:
+        if k.lower() == b"cookie":
+            raw = v.decode("latin-1")
+            for item in raw.split(";"):
+                item = item.strip()
+                if "=" in item:
+                    ck, cv = item.split("=", 1)
+                    if ck.strip() == name:
+                        return cv.strip()
+    return None
 
 # 7 days in milliseconds
 SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
@@ -758,8 +808,57 @@ class CacheHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+class AuthMiddleware:
+    """Raw ASGI middleware enforcing single-password signed cookie auth on all API and static UI routes."""
+    EXEMPT_PATHS = {"/login", "/api/auth/login", "/api/auth/logout", "/api/health"}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not KEEPBOARD_PASSWORD:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in self.EXEMPT_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        cookie_val = _extract_cookie(scope.get("headers", []), AUTH_COOKIE_NAME)
+        if _verify_session_cookie(cookie_val):
+            await self.app(scope, receive, send)
+            return
+
+        if path.startswith("/api/"):
+            body = b'{"detail":"Authentication required"}'
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"cache-control", b"no-cache, no-store, must-revalidate"),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        # Unauthenticated static UI / page request -> redirect to /login
+        await send({
+            "type": "http.response.start",
+            "status": 302,
+            "headers": [
+                (b"location", b"/login"),
+                (b"cache-control", b"no-cache, no-store, must-revalidate"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": b""})
+
+
 app = FastAPI(title="KeepBoard", lifespan=lifespan)
 app.add_middleware(CacheHeadersMiddleware)
+app.add_middleware(AuthMiddleware)
 app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 
@@ -2773,6 +2872,185 @@ async def vault_change(
         except Exception:
             pass
     return {"status": "changed", "ok": True}
+
+
+# ---------------------------------------------------------------------------
+# API: Single-Password Authentication & Login Page
+# ---------------------------------------------------------------------------
+
+LOGIN_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in — KeepBoard</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231E2023'/%3E%3Cpath fill='%23FACC15' transform='translate(4,4)' d='M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7zm2.85 11.1l-.85.6V16h-4v-1.3l-.85-.6A5.003 5.003 0 0 1 7 9c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.63-.8 3.16-2.15 4.1z'/%3E%3C/svg%3E">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #141517;
+      color: #E8EAED;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 20px;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 360px;
+      background: #1E2023;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      padding: 28px 24px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 19px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+    .brand svg { width: 24px; height: 24px; fill: #FACC15; }
+    .subtitle { font-size: 13px; color: #9AA0A6; line-height: 1.4; }
+    form { display: flex; flex-direction: column; gap: 12px; }
+    input[type="password"] {
+      width: 100%;
+      padding: 11px 14px;
+      background: #141517;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      color: #E8EAED;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    input[type="password"]:focus { border-color: #FACC15; }
+    button {
+      width: 100%;
+      padding: 11px 14px;
+      background: #FACC15;
+      color: #141517;
+      border: none;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s ease;
+    }
+    button:hover { opacity: 0.9; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .err {
+      display: none;
+      font-size: 12.5px;
+      color: #F28B82;
+      background: rgba(242, 139, 130, 0.1);
+      border: 1px solid rgba(242, 139, 130, 0.25);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="brand">
+      <svg viewBox="0 0 24 24"><path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/></svg>
+      <span>KeepBoard</span>
+    </div>
+    <p class="subtitle">Enter your password to unlock this board.</p>
+    <div id="err" class="err"></div>
+    <form id="login-form">
+      <input id="pw" type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
+      <button id="submit-btn" type="submit">Unlock</button>
+    </form>
+  </div>
+  <script>
+    const form = document.getElementById("login-form");
+    const pw = document.getElementById("pw");
+    const err = document.getElementById("err");
+    const btn = document.getElementById("submit-btn");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.style.display = "none";
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pw.value })
+        });
+        if (res.ok) {
+          window.location.href = "/";
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        err.textContent = data.detail || "Incorrect password.";
+        err.style.display = "block";
+        pw.select();
+      } catch (_) {
+        err.textContent = "Network error. Please try again.";
+        err.style.display = "block";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>"""
+
+
+@app.get("/login")
+async def login_page(request: Request):
+    """Serve minimal dark-mode login page, or redirect to / if already authenticated."""
+    if not KEEPBOARD_PASSWORD or _verify_session_cookie(request.cookies.get(AUTH_COOKIE_NAME)):
+        return Response(status_code=302, headers={"Location": "/"})
+    return Response(
+        content=LOGIN_PAGE_HTML,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    """Verify KEEPBOARD_PASSWORD and set 30-day signed HttpOnly SameSite=Lax cookie."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    pw = str(payload.get("password") or "")
+    if KEEPBOARD_PASSWORD and not hmac.compare_digest(pw.encode("utf-8"), KEEPBOARD_PASSWORD.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Incorrect password.")
+
+    token = _create_session_cookie_value()
+    resp = Response(
+        content='{"status":"ok"}',
+        media_type="application/json",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
+    resp.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=AUTH_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        path="/"
+    )
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    """Clear the KeepBoard session cookie."""
+    resp = Response(content='{"status":"logged_out"}', media_type="application/json")
+    resp.delete_cookie(key=AUTH_COOKIE_NAME, path="/", samesite="lax")
+    return resp
 
 
 # ---------------------------------------------------------------------------
