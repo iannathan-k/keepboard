@@ -17,7 +17,7 @@ import {
   renderChecklistEditor,
   convertTextToChecklist,
   convertChecklistToText,
-} from "./editor.js?v=14";
+} from "./editor.js?v=15";
 
 import {
   formatDateTimeStamp,
@@ -26,7 +26,7 @@ import {
   setupCardDropzone,
   createQRCodeSVG,
   initMedia,
-} from "./media.js?v=14";
+} from "./media.js?v=15";
 
 // ── Universal Clipboard Copy Helper with HTTP/Insecure Context Fallback ──────
 export async function copyToClipboard(text) {
@@ -4505,6 +4505,19 @@ function setupEventListeners() {
   };
 
   btnImportBackup.onclick = () => backupFileInput.click();
+
+  // Logout (Header & Sidebar)
+  const performLogout = async () => {
+    try {
+      sessionStorage.removeItem("keepboard_vault_token");
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch (_) {}
+    window.location.href = "/login";
+  };
+  const headerLogoutBtn = document.getElementById("header-logout-btn");
+  const sidebarLogoutBtn = document.getElementById("btn-logout");
+  if (headerLogoutBtn) headerLogoutBtn.onclick = performLogout;
+  if (sidebarLogoutBtn) sidebarLogoutBtn.onclick = performLogout;
   backupFileInput.onchange = async () => {
     if (backupFileInput.files.length > 0) {
       if (!confirm("Restoring a backup will overwrite cards with the backup contents. Proceed?")) {
