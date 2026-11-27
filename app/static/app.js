@@ -17,7 +17,7 @@ import {
   renderChecklistEditor,
   convertTextToChecklist,
   convertChecklistToText,
-} from "./editor.js?v=15";
+} from "./editor.js?v=16";
 
 import {
   formatDateTimeStamp,
@@ -26,7 +26,7 @@ import {
   setupCardDropzone,
   createQRCodeSVG,
   initMedia,
-} from "./media.js?v=15";
+} from "./media.js?v=16";
 
 // ── Universal Clipboard Copy Helper with HTTP/Insecure Context Fallback ──────
 export async function copyToClipboard(text) {
@@ -4390,6 +4390,11 @@ function setupEventListeners() {
     if (!e.target.closest(".card-ws-popover") && !e.target.closest("button[title='Move to workspace']")) {
       document.querySelectorAll(".card-ws-popover").forEach((el) => el.remove());
     }
+    const headerMenuPopover = document.getElementById("header-menu-popover");
+    const headerMenuBtn = document.getElementById("header-menu-btn");
+    if (headerMenuPopover && !headerMenuPopover.contains(e.target) && headerMenuBtn && !headerMenuBtn.contains(e.target)) {
+      headerMenuPopover.classList.remove("show");
+    }
   });
 
   // Spotlight Command Palette
@@ -4498,26 +4503,44 @@ function setupEventListeners() {
     tagPromptBackdrop.style.display = "none";
   };
 
+  // Header Hamburger Menu (Backups + Sign Out)
+  const headerMenuBtn = document.getElementById("header-menu-btn");
+  const headerMenuPopover = document.getElementById("header-menu-popover");
+  if (headerMenuBtn && headerMenuPopover) {
+    headerMenuBtn.onclick = (e) => {
+      e.stopPropagation();
+      headerMenuPopover.classList.toggle("show");
+    };
+  }
+
   // Backups Export / Import
-  btnExportBackup.onclick = () => {
-    window.location.href = "/api/backup/export";
-    showToast("Exporting workspace backup (.zip)...");
-  };
+  if (btnExportBackup) {
+    btnExportBackup.onclick = () => {
+      if (headerMenuPopover) headerMenuPopover.classList.remove("show");
+      window.location.href = "/api/backup/export";
+      showToast("Exporting workspace backup (.zip)...");
+    };
+  }
 
-  btnImportBackup.onclick = () => backupFileInput.click();
+  if (btnImportBackup) {
+    btnImportBackup.onclick = () => {
+      if (headerMenuPopover) headerMenuPopover.classList.remove("show");
+      backupFileInput.click();
+    };
+  }
 
-  // Logout (Header & Sidebar)
-  const performLogout = async () => {
-    try {
-      sessionStorage.removeItem("keepboard_vault_token");
-      await fetch("/api/auth/logout", { method: "POST" });
-    } catch (_) {}
-    window.location.href = "/login";
-  };
-  const headerLogoutBtn = document.getElementById("header-logout-btn");
-  const sidebarLogoutBtn = document.getElementById("btn-logout");
-  if (headerLogoutBtn) headerLogoutBtn.onclick = performLogout;
-  if (sidebarLogoutBtn) sidebarLogoutBtn.onclick = performLogout;
+  // Sign Out
+  const btnLogout = document.getElementById("btn-logout");
+  if (btnLogout) {
+    btnLogout.onclick = async () => {
+      if (headerMenuPopover) headerMenuPopover.classList.remove("show");
+      try {
+        sessionStorage.removeItem("keepboard_vault_token");
+        await fetch("/api/auth/logout", { method: "POST" });
+      } catch (_) {}
+      window.location.href = "/login";
+    };
+  }
   backupFileInput.onchange = async () => {
     if (backupFileInput.files.length > 0) {
       if (!confirm("Restoring a backup will overwrite cards with the backup contents. Proceed?")) {
